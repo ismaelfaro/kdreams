@@ -227,6 +227,38 @@ def _extract_yaml(text: str) -> str:
     return text.strip()
 
 
+def _sanitize_recipe_data(data: dict) -> dict:
+    """Fix common agent-generated YAML issues before Pydantic parsing."""
+    import copy
+    data = copy.deepcopy(data)
+
+    # Ensure tested_on is always a list
+    backends = data.get("backends") or {}
+    local = backends.get("local") or {}
+    if isinstance(local, dict):
+        if not local.get("tested_on"):
+            local["tested_on"] = ["cpu"]
+        backends["local"] = local
+        data["backends"] = backends
+
+    # Ensure source.repo is a string (not None)
+    source = data.get("source") or {}
+    if isinstance(source, dict):
+        if source.get("repo") is None:
+            source["repo"] = ""
+        data["source"] = source
+
+    # Normalise output types: map unknown types to nearest valid value
+    _valid_output_types = {"file", "string", "base64", "json", "directory"}
+    for out in data.get("outputs") or []:
+        if isinstance(out, dict) and out.get("type") not in _valid_output_types:
+            # directory-like → directory; else fall back to file
+            t = str(out.get("type", "file")).lower()
+            out["type"] = "directory" if "dir" in t or "folder" in t else "file"
+
+    return data
+
+
 def _extract_python(text: str) -> str:
     """Strip markdown code fences from a Python block if present."""
     if "```python" in text:
@@ -356,7 +388,11 @@ class RecipeGeneratorAgent:
 
         # ── Parse & validate ──────────────────────────────────────────────
         try:
-            recipe = parse_yaml_recipe(yaml_content)
+            import yaml as _yaml
+            raw_data = _yaml.safe_load(yaml_content)
+            if isinstance(raw_data, dict):
+                raw_data = _sanitize_recipe_data(raw_data)
+            recipe = parse_yaml_recipe(_yaml.dump(raw_data, allow_unicode=True))
         except Exception as exc:
             console.print(f"[yellow]Warning:[/yellow] Could not parse recipe: {exc}")
             console.print("[dim]Raw output:[/dim]\n" + yaml_content)

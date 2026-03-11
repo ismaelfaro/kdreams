@@ -45,14 +45,14 @@ inputs:
 
 outputs:
   - name: result
-    type: file
+    type: file          # valid: file | string | base64 | json | directory
     path: outputs/{timestamp}.png
 
 backends:
   local:
     requires_gpu: <true|false>
     min_vram_gb: <number>
-    tested_on: [cuda]
+    tested_on: [cuda]   # always include at least one value; valid: cuda, mps, cpu
 ```
 
 ## Rules
@@ -66,6 +66,8 @@ backends:
 7. Include realistic `min_vram_gb` based on model size.
 8. Tags from: image-generation, text-generation, audio, video-generation, 3d, diffusion, transformer, game, tool, open-source, research.
 9. If the repo is a game or non-ML project, still produce a valid recipe — set `requires_gpu: false`, `models: []`, and use appropriate tags.
+10. `outputs[].type` must be one of: `file`, `string`, `base64`, `json`, `directory`. Use `directory` when the script writes multiple files to a folder. Never use any other value.
+11. `backends.local.tested_on` must always be a non-empty list, e.g. `[cuda]`, `[cpu]`, or `[cuda, mps]`. Never leave it blank or empty.
 
 ## HuggingFace Model Sources
 

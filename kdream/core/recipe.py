@@ -43,7 +43,7 @@ class InputSpec(BaseModel):
 
 class OutputSpec(BaseModel):
     name: str
-    type: Literal["file", "string", "base64", "json"]
+    type: Literal["file", "string", "base64", "json", "directory"]
     path: str | None = None
 
 
