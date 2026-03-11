@@ -69,6 +69,7 @@ class RecipeMetadata(BaseModel):
     tags: list[str] = []
     license: str = "unknown"
     author: str = "community"
+    repo: str = ""   # source git repository URL (populated by registry client)
 
     @field_validator("name")
     @classmethod

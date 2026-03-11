@@ -162,7 +162,8 @@ class RegistryClient:
         for yaml_file in sorted(_BUNDLED_RECIPES_DIR.rglob("*.yaml")):
             try:
                 recipe = parse_yaml_recipe(yaml_file.read_text())
-                recipes.append(recipe.metadata)
+                meta = recipe.metadata.model_copy(update={"repo": recipe.source.repo})
+                recipes.append(meta)
             except Exception:
                 pass
         return recipes
@@ -190,7 +191,10 @@ class RegistryClient:
                             yaml_resp = httpx.get(raw_url, timeout=15, follow_redirects=True)
                             if yaml_resp.status_code == 200:
                                 recipe = parse_yaml_recipe(yaml_resp.text)
-                                recipes.append(recipe.metadata)
+                                meta = recipe.metadata.model_copy(
+                                    update={"repo": recipe.source.repo}
+                                )
+                                recipes.append(meta)
                         except Exception:
                             pass
         except httpx.RequestError as e:

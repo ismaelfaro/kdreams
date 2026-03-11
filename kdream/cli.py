@@ -176,17 +176,18 @@ def list_recipes(tags, backend, search):
             return
 
         table = Table(title="Available Recipes", show_header=True, header_style="bold cyan")
-        table.add_column("Name", style="cyan", min_width=30)
-        table.add_column("Version", min_width=8)
-        table.add_column("Tags", style="green")
-        table.add_column("Description", style="dim")
+        table.add_column("Name", style="cyan", min_width=28)
+        table.add_column("Tags", style="green", min_width=16)
+        table.add_column("Description", style="dim", min_width=20)
+        table.add_column("Repo", style="blue", min_width=30)
 
         for r in recipes:
+            repo_display = r.repo.removeprefix("https://github.com/") if r.repo else ""
             table.add_row(
                 r.name,
-                r.version,
                 ", ".join(r.tags[:3]),
-                (r.description[:60] + "…") if len(r.description) > 60 else r.description,
+                (r.description[:55] + "…") if len(r.description) > 55 else r.description,
+                repo_display,
             )
         console.print(table)
     except Exception as exc:
