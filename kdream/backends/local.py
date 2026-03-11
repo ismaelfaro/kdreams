@@ -373,13 +373,14 @@ class InferenceRunner:
         inputs: dict[str, Any],
         venv_path: Path,
         repo_path: Path,
+        script_override: Path | None = None,
     ) -> list[str]:
         """Map recipe inputs to a CLI command list."""
         python_bin = venv_path / "bin" / "python"
         if not python_bin.exists():
             python_bin = venv_path / "Scripts" / "python.exe"
 
-        script = repo_path / recipe.entrypoint.script
+        script = script_override or (repo_path / recipe.entrypoint.script)
 
         if recipe.entrypoint.args_template:
             # Fill in template string
@@ -605,7 +606,11 @@ class LocalBackend(AbstractBackend):
             elif spec.default is not None:
                 merged[name] = spec.default
 
-        cmd = self.runner.build_command(recipe, merged, package.venv_path, package.repo_path)
+        wrapper = self._ensure_cli_wrapper(recipe, package)
+        cmd = self.runner.build_command(
+            recipe, merged, package.venv_path, package.repo_path,
+            script_override=wrapper,
+        )
         if self.verbose:
             console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
         else:
@@ -653,6 +658,122 @@ class LocalBackend(AbstractBackend):
                 final_outputs[name] = value
 
         return final_outputs
+
+    # ------------------------------------------------------------------
+    # CLI wrapper generation
+    # ------------------------------------------------------------------
+
+    def _ensure_cli_wrapper(self, recipe: Recipe, package) -> Path | None:
+        """Return a wrapper script path when the inference script has no CLI
+        argument support, otherwise return None (use the original script).
+
+        The wrapper is generated once at run time and cached in the repo dir.
+        """
+        script_path = package.repo_path / recipe.entrypoint.script
+        if not script_path.exists():
+            return None
+
+        try:
+            source = script_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+        # If the script already handles CLI args, no wrapper needed
+        cli_indicators = ["argparse", "click.command", "@app.command",
+                          "fire.Fire", "sys.argv[", "typer"]
+        if any(ind in source for ind in cli_indicators):
+            return None
+
+        wrapper_path = package.repo_path / "_kdream_runner.py"
+        if not wrapper_path.exists():
+            console.print("  [dim]Patching inference script to accept CLI inputs…[/dim]")
+            wrapper_source = self._build_cli_wrapper(recipe, script_path, source)
+            wrapper_path.write_text(wrapper_source, encoding="utf-8")
+
+        return wrapper_path
+
+    def _build_cli_wrapper(
+        self, recipe: Recipe, script_path: Path, source: str
+    ) -> str:
+        """Generate a wrapper that:
+        1. Parses recipe inputs as CLI flags via argparse.
+        2. Uses Python AST to find top-level variable assignments matching
+           recipe input names and injects override lines immediately after
+           each one, so CLI values win over hardcoded defaults.
+        """
+        import ast
+        import textwrap
+
+        # ── argparse declarations ────────────────────────────────────────
+        arg_lines: list[str] = []
+        for name, spec in recipe.inputs.items():
+            flag = name.replace("_", "-")
+            if spec.type == "boolean":
+                arg_lines.append(
+                    f'_kp.add_argument("--{flag}", action="store_true", default=False)'
+                )
+            elif spec.type == "integer":
+                arg_lines.append(f'_kp.add_argument("--{flag}", type=int, default=None)')
+            elif spec.type == "float":
+                arg_lines.append(f'_kp.add_argument("--{flag}", type=float, default=None)')
+            else:
+                arg_lines.append(f'_kp.add_argument("--{flag}", type=str, default=None)')
+
+        # ── AST scan: find top-level assignments matching input names ────
+        input_names = set(recipe.inputs.keys())
+        # end_lineno → list of override statements to insert after that line
+        overrides: dict[int, list[str]] = {}
+        try:
+            tree = ast.parse(source)
+            for node in tree.body:
+                if not isinstance(node, ast.Assign):
+                    continue
+                for target in node.targets:
+                    if not (isinstance(target, ast.Name) and target.id in input_names):
+                        continue
+                    varname = target.id
+                    spec = recipe.inputs[varname]
+                    cast = {"integer": "int", "float": "float", "boolean": "bool"}.get(
+                        spec.type, "str"
+                    )
+                    override = (
+                        f"if _kdream_args.get('{varname}') is not None: "
+                        f"{varname} = {cast}(_kdream_args['{varname}'])"
+                    )
+                    if node.end_lineno is not None:
+                        overrides.setdefault(node.end_lineno, []).append(override)
+        except SyntaxError:
+            pass
+
+        # ── Inject override lines into source ────────────────────────────
+        src_lines = source.splitlines()
+        patched: list[str] = []
+        for i, line in enumerate(src_lines, start=1):
+            patched.append(line)
+            if i in overrides:
+                patched.extend(overrides[i])
+        patched_source = "\n".join(patched)
+
+        # ── Preamble ─────────────────────────────────────────────────────
+        arg_block = "\n".join(arg_lines)
+        preamble = textwrap.dedent(f"""\
+            \"\"\"kdream CLI wrapper for {recipe.metadata.name} — auto-generated.\"\"\"
+            import argparse as _kap
+            import os as _kos
+            _kos.chdir({repr(str(script_path.parent))})
+            __file__ = {repr(str(script_path))}
+            _kp = _kap.ArgumentParser()
+            {arg_block}
+            _kdream_args = {{
+                k.replace("-", "_"): v
+                for k, v in vars(_kp.parse_known_args()[0]).items()
+                if v is not None
+            }}
+
+            # ── Original script (patched with CLI overrides) ──
+        """)
+
+        return preamble + patched_source
 
     def is_installed(self, recipe_name: str, cache_dir: Path) -> bool:
         pkg_dir = cache_dir / recipe_name

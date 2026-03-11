@@ -16,7 +16,7 @@ from kdream.core.recipe import Recipe, load_recipe, validate_recipe
 from kdream.core.runner import RunResult, PackageInfo, run, install, list_installed
 from kdream.exceptions import KdreamError, RecipeError, RegistryError, BackendError
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def list_recipes(

@@ -21,7 +21,7 @@ models:
 
 entrypoint:
   script: demos/musicgen_app.py
-  type: python
+  type: gradio
 
 inputs:
   description:

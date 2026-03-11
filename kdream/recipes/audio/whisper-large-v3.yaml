@@ -22,16 +22,14 @@ models:
 entrypoint:
   script: whisper/__main__.py
   type: cli
+  # audio_file is a positional arg; task and output_format are flags
+  args_template: "{audio_file} --task {task} --output_format {output_format} --model large-v3"
 
 inputs:
   audio_file:
     type: string
     required: true
     description: Path to the audio file to transcribe (mp3, wav, m4a, etc.)
-  language:
-    type: string
-    default: ""
-    description: Language code (e.g. 'en', 'fr', 'de'). Empty for auto-detect.
   task:
     type: string
     default: transcribe

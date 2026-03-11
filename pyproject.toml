@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kdream"
-version = "0.4.0"
+version = "0.5.0"
 description = "Universal AI Model Runtime & Recipe Platform — run any AI model with a single command."
 readme = "README.md"
 license = { text = "Apache-2.0" }
