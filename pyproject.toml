@@ -5,11 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "kdream"
 version = "0.4.0"
-description = "A Python library for orchestrating AI model workflows and recipes across multiple backends."
+description = "Universal AI Model Runtime & Recipe Platform — run any AI model with a single command."
+readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 authors = [
-    { name = "ismael faro" },
+    { name = "Ismael Faro", email = "ismael.faro1@gmail.com" },
 ]
 keywords = [
     "ai",
@@ -20,11 +21,14 @@ keywords = [
     "text-generation",
     "audio-generation",
     "video-generation",
+    "inference",
     "recipes",
     "workflows",
+    "stable-diffusion",
+    "huggingface",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
@@ -35,7 +39,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Environment :: Console",
+    "Environment :: GPU",
 ]
+
 dependencies = [
     "uv",
     "huggingface_hub",
@@ -47,6 +54,13 @@ dependencies = [
     "gitpython",
     "anthropic",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ismaelfaro/kdreams"
+Repository = "https://github.com/ismaelfaro/kdreams"
+Documentation = "https://github.com/ismaelfaro/kdreams/tree/main/docs"
+"Bug Tracker" = "https://github.com/ismaelfaro/kdreams/issues"
+Changelog = "https://github.com/ismaelfaro/kdreams/releases"
 
 [project.optional-dependencies]
 runpod = ["runpod"]
