@@ -129,6 +129,7 @@ class TestCreateMcpServer:
         expected = {
             "run_recipe", "install_recipe", "list_recipes",
             "generate_recipe", "validate_recipe", "list_installed",
+            "detect_accelerator",
         }
         assert expected == tool_names
 

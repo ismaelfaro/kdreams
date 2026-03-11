@@ -14,9 +14,10 @@ Quick start::
 
 from kdream.core.recipe import Recipe, load_recipe, validate_recipe
 from kdream.core.runner import RunResult, PackageInfo, run, install, list_installed
+from kdream.backends.local import detect_accelerator
 from kdream.exceptions import KdreamError, RecipeError, RegistryError, BackendError
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 
 def list_recipes(
@@ -63,6 +64,7 @@ __all__ = [
     "list_recipes",
     "list_installed",
     "generate_recipe",
+    "detect_accelerator",
     "load_recipe",
     "validate_recipe",
     "Recipe",

@@ -213,4 +213,20 @@ def create_mcp_server(host: str = "127.0.0.1", port: int = 8765) -> FastMCP:
             for pkg in packages
         ]
 
+    # ── detect_accelerator ────────────────────────────────────────────────
+
+    @mcp.tool()
+    def detect_accelerator() -> dict[str, Any]:
+        """Detect the best available compute accelerator on the server machine.
+
+        Priority: cuda (NVIDIA GPU) > mps (Apple Silicon) > cpu.
+        """
+        from kdream.backends.local import HardwareDetector
+        hw = HardwareDetector().detect()
+        return {
+            "device": hw["device"],
+            "vram_gb": hw.get("vram_gb", 0),
+            "cuda_version": hw.get("cuda_version"),
+        }
+
     return mcp

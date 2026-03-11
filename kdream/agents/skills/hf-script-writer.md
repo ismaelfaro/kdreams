@@ -67,13 +67,25 @@ if __name__ == "__main__":
 
 ## Rules
 
-1. Always use `torch.float16` for GPU memory efficiency, with `device_map="auto"` or `.to("cuda")` / `.to("mps")` based on availability.
-2. Add a hardware auto-detection snippet: check `torch.cuda.is_available()` → CUDA, `torch.backends.mps.is_available()` → MPS, else CPU.
+1. **Always read the device from the `KDREAM_DEVICE` environment variable first** (set by kdream's accelerator detection). Fall back to auto-detection only if the env var is absent.
+   ```python
+   import os, torch
+   _kdream_device = os.environ.get("KDREAM_DEVICE", "").strip()
+   if _kdream_device in ("cuda", "mps", "cpu"):
+       device = _kdream_device
+   elif torch.cuda.is_available():
+       device = "cuda"
+   elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+       device = "mps"
+   else:
+       device = "cpu"
+   ```
+2. Use `torch.float16` on CUDA/MPS for memory efficiency; `torch.float32` on CPU.
 3. Include `--output-dir` argument with default `"outputs"`.
-4. Include `--seed` argument with default `-1` (use `torch.manual_seed(seed)` when seed != -1).
-5. Print `OUTPUT:<path>` for every generated file so kdream can capture the result.
-6. Use sensible defaults for all optional parameters (steps=20 for turbo/fast models, 30 for standard diffusion; guidance_scale=7.5 for standard, 0.0 for turbo/distilled models).
-7. Handle both CUDA and MPS (Apple Silicon) gracefully.
+4. Include `--device` argument with default `""` (empty = use KDREAM_DEVICE auto-detection above).
+5. Include `--seed` argument with default `-1` (use `torch.manual_seed(seed)` when seed != -1).
+6. Print `OUTPUT:<path>` for every generated file so kdream can capture the result.
+7. Use sensible defaults for all optional parameters (steps=20 for turbo/fast models, 30 for standard diffusion; guidance_scale=7.5 for standard, 0.0 for turbo/distilled models).
 8. The script must be runnable standalone with just `python run.py --prompt "..."`.
 9. Do not include any API keys or authentication — HF models are loaded publicly.
 

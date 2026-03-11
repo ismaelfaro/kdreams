@@ -61,7 +61,7 @@ class HardwareDetector:
         except ImportError:
             pass
 
-        # Try nvidia-smi as fallback
+        # Try nvidia-smi as fallback (torch not available in host env)
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
@@ -77,6 +77,21 @@ class HardwareDetector:
             pass
 
         return info
+
+    def best_accelerator(self) -> str:
+        """Return the best available accelerator: 'cuda' > 'mps' > 'cpu'."""
+        return self.detect()["device"]
+
+
+def detect_accelerator() -> str:
+    """Detect the best available compute accelerator on this machine.
+
+    Priority: CUDA (NVIDIA GPU) > MPS (Apple Silicon) > CPU.
+
+    Returns:
+        ``"cuda"``, ``"mps"``, or ``"cpu"``.
+    """
+    return HardwareDetector().best_accelerator()
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +613,10 @@ class LocalBackend(AbstractBackend):
                 "Input validation failed:\n" + "\n".join(f"  • {e}" for e in errors)
             )
 
+        # Detect best accelerator and inject it
+        accelerator = self.hardware.best_accelerator()
+        console.print(f"  [dim]Accelerator: [bold]{accelerator}[/bold][/dim]")
+
         # Apply defaults for missing optional inputs
         merged: dict[str, Any] = {}
         for name, spec in recipe.inputs.items():
@@ -605,6 +624,12 @@ class LocalBackend(AbstractBackend):
                 merged[name] = inputs[name]
             elif spec.default is not None:
                 merged[name] = spec.default
+
+        # Override device-like inputs unless user explicitly provided them
+        _device_keys = {"device", "accelerator", "compute_device", "device_type"}
+        for key in _device_keys:
+            if key in recipe.inputs and key not in inputs:
+                merged[key] = accelerator
 
         wrapper = self._ensure_cli_wrapper(recipe, package)
         cmd = self.runner.build_command(
@@ -620,7 +645,9 @@ class LocalBackend(AbstractBackend):
         import time
 
         run_start = time.time()
-        rc, stdout, stderr = self.runner.execute(cmd, cwd=package.repo_path)
+        rc, stdout, stderr = self.runner.execute(
+            cmd, cwd=package.repo_path, env={"KDREAM_DEVICE": accelerator}
+        )
 
         if self.verbose:
             if stdout.strip():
@@ -796,6 +823,8 @@ class LocalBackend(AbstractBackend):
             "import os as _kos",
             f"_kos.chdir({repr(str(script_path.parent))})",
             f"__file__ = {repr(str(script_path))}",
+            "# KDREAM_DEVICE is set by the kdream runner to the best detected accelerator.",
+            "# Scripts can read it via os.environ.get('KDREAM_DEVICE', 'cpu').",
             "_kp = _kap.ArgumentParser()",
             *arg_lines,
             "_kdream_args = {",

@@ -15,7 +15,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.10.0", prog_name="kdream")
+@click.version_option(version="0.10.1", prog_name="kdream")
 def cli():
     """kdream — Run any AI model with a single command.
 
@@ -341,6 +341,38 @@ def validate(recipe_file):
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
+
+
+@cli.command()
+def accelerator():
+    """Detect and display the best available compute accelerator.
+
+    \b
+    Priority: cuda (NVIDIA GPU) > mps (Apple Silicon) > cpu.
+
+    \b
+    Example:
+      kdream accelerator
+    """
+    from kdream.backends.local import HardwareDetector
+    hw = HardwareDetector().detect()
+    device = hw["device"]
+
+    colour = {"cuda": "green", "mps": "blue", "cpu": "yellow"}.get(device, "white")
+    label = {"cuda": "NVIDIA CUDA GPU", "mps": "Apple Silicon (MPS)", "cpu": "CPU"}.get(
+        device, device
+    )
+
+    console.print(f"\n[bold {colour}]✓ Best accelerator: {device.upper()}[/bold {colour}]")
+    console.print(f"  [dim]{label}[/dim]")
+    if hw.get("vram_gb"):
+        console.print(f"  VRAM: [yellow]{hw['vram_gb']} GB[/yellow]")
+    if hw.get("cuda_version"):
+        console.print(f"  CUDA: [dim]{hw['cuda_version']}[/dim]")
+    console.print(
+        f"\n[dim]kdream will automatically use [bold]{device}[/bold] "
+        f"when running recipes (env: KDREAM_DEVICE={device})[/dim]"
+    )
 
 
 @cli.command()

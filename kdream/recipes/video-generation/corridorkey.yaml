@@ -1,0 +1,78 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: corridorkey
+  version: 1.0.0
+  description: Neural network green screen keying tool that extracts foreground elements
+    with clean alpha channels using a transformer model
+  tags:
+  - video-generation
+  - diffusion
+  - transformer
+  - tool
+  - open-source
+  license: CC-BY-NC-SA-4.0
+  author: kdream-community
+  repo: ''
+source:
+  repo: https://github.com/nikopueringer/CorridorKey
+  ref: main
+  install_extras: []
+models:
+- name: corridorkey-v1
+  source: url
+  id: https://huggingface.co/nikopueringer/CorridorKey_v1.0/resolve/main/CorridorKey_v1.0.pth
+  destination: CorridorKeyModule/checkpoints/CorridorKey.pth
+entrypoint:
+  script: corridorkey_cli.py
+  type: python
+  args_mapping: {}
+  generated_wrapper: false
+inputs:
+  alpha_hint:
+    type: string
+    required: false
+    default: ''
+    description: Path to a coarse alpha hint mask for the clip (optional)
+  checkpoint:
+    type: string
+    required: false
+    default: CorridorKeyModule/checkpoints/CorridorKey.pth
+    description: Path to CorridorKey model checkpoint (.pth file)
+  device:
+    type: string
+    required: false
+    default: auto
+    description: Device to run inference on (cuda, mps, cpu, or auto)
+  input:
+    type: string
+    required: true
+    description: Path to input green screen clip or image file to be keyed
+  output:
+    type: string
+    required: false
+    default: Output/
+    description: Path to output directory for keyed results
+  use_gvm:
+    type: boolean
+    required: false
+    default: false
+    description: Use GVM module to auto-generate alpha hints (requires ~80GB VRAM)
+  use_videomama:
+    type: boolean
+    required: false
+    default: false
+    description: Use VideoMaMa module to auto-generate alpha hints (requires ~24GB+
+      VRAM)
+outputs:
+- name: result
+  type: directory
+  path: Output/
+backends:
+  local:
+    requires_gpu: false
+    min_vram_gb: 6
+    tested_on:
+    - cuda
+    - mps
+    - cpu
