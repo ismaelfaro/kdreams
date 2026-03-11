@@ -15,7 +15,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.8.0", prog_name="kdream")
+@click.version_option(version="0.9.0", prog_name="kdream")
 def cli():
     """kdream — Run any AI model with a single command.
 
@@ -305,6 +305,80 @@ def validate(recipe_file):
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
+
+
+@cli.command()
+@click.option("--port", default=8765, show_default=True,
+              help="Port to bind the MCP server to.")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Host to bind (use 0.0.0.0 to listen on all interfaces).")
+@click.option("--transport", default="http",
+              type=click.Choice(["stdio", "http"]), show_default=True,
+              help="MCP transport: stdio (for Claude Desktop) or http (streamable-http).")
+@click.option("--ngrok", "use_ngrok", is_flag=True, default=False,
+              help="Expose the server publicly via an ngrok tunnel.")
+@click.option("--ngrok-token", default=None, envvar="NGROK_AUTHTOKEN",
+              help="ngrok auth token (or set NGROK_AUTHTOKEN env var).")
+def serve(port, host, transport, use_ngrok, ngrok_token):
+    """Start kdream as an MCP server.
+
+    \b
+    Exposes kdream tools over the Model Context Protocol so any MCP-compatible
+    client (Claude Desktop, Cursor, etc.) can invoke run_recipe, install_recipe,
+    list_recipes, generate_recipe, validate_recipe, and list_installed.
+
+    \b
+    Examples:
+      kdream serve --transport stdio          # stdio (Claude Desktop)
+      kdream serve --transport http           # streamable-http on port 8765
+      kdream serve --transport http --ngrok   # public ngrok URL
+    """
+    try:
+        from kdream.service.mcp_server import create_mcp_server
+    except ImportError:
+        console.print(
+            "[bold red]Error:[/bold red] MCP dependencies not installed.\n"
+            "Run: [cyan]uv pip install 'kdream[service]'[/cyan]"
+        )
+        sys.exit(1)
+
+    mcp = create_mcp_server(host=host, port=port)
+
+    if transport == "stdio":
+        console.print("[bold blue]Starting kdream MCP server[/bold blue] (stdio)")
+        console.print("[dim]Connect via Claude Desktop or any stdio MCP client.[/dim]")
+        mcp.run(transport="stdio")
+        return
+
+    tunnel = None
+    try:
+        if use_ngrok:
+            from kdream.service.ngrok_tunnel import NgrokTunnel
+            tunnel = NgrokTunnel(port=port, auth_token=ngrok_token)
+            public_url = tunnel.start()
+            console.print(Panel(
+                f"[bold green]kdream MCP server[/bold green]\n"
+                f"Local:  [cyan]http://{host}:{port}/mcp[/cyan]\n"
+                f"Public: [cyan]{public_url}/mcp[/cyan]",
+                title="MCP Server",
+                expand=False,
+            ))
+        else:
+            console.print(Panel(
+                f"[bold green]kdream MCP server[/bold green]\n"
+                f"URL: [cyan]http://{host}:{port}/mcp[/cyan]\n"
+                f"[dim]Use --ngrok to expose publicly.[/dim]",
+                title="MCP Server",
+                expand=False,
+            ))
+
+        mcp.run(transport="streamable-http")
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped.[/yellow]")
+    finally:
+        if tunnel is not None:
+            tunnel.stop()
 
 
 @cli.group()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kdream"
-version = "0.8.0"
+version = "0.9.0"
 description = "Universal AI Model Runtime & Recipe Platform — run any AI model with a single command."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -65,6 +65,10 @@ Changelog = "https://github.com/ismaelfaro/kdreams/releases"
 [project.optional-dependencies]
 runpod = ["runpod"]
 kubernetes = ["kubernetes"]
+service = [
+    "mcp>=1.6",
+    "pyngrok>=7.0",
+]
 
 [project.scripts]
 kdream = "kdream.cli:cli"
