@@ -344,6 +344,127 @@ def validate(recipe_file):
 
 
 @cli.command()
+@click.argument("recipe")
+def info(recipe):
+    """Show detailed info about a recipe: inputs, outputs, models, backend requirements.
+
+    \b
+    RECIPE can be a registry name or a local file path.
+
+    \b
+    Examples:
+      kdream info stable-diffusion-xl-base
+      kdream info ./my-recipe.yaml
+    """
+    try:
+        from kdream.core.runner import _resolve_recipe
+        from kdream.backends.local import HardwareDetector
+
+        r = _resolve_recipe(recipe)
+        hw = HardwareDetector().detect()
+        local = r.backends.local
+
+        # ── Header ────────────────────────────────────────────────────────
+        console.print(Panel(
+            f"[bold cyan]{r.metadata.name}[/bold cyan]  "
+            f"[dim]v{r.metadata.version}[/dim]\n"
+            f"{r.metadata.description}",
+            title="Recipe Info",
+            expand=False,
+        ))
+
+        # ── Metadata ──────────────────────────────────────────────────────
+        meta_table = Table(show_header=False, box=None, padding=(0, 2))
+        meta_table.add_column(style="bold dim", no_wrap=True)
+        meta_table.add_column()
+        meta_table.add_row("Tags",    ", ".join(r.metadata.tags) or "—")
+        meta_table.add_row("License", r.metadata.license)
+        meta_table.add_row("Author",  r.metadata.author)
+        if r.source.repo:
+            meta_table.add_row("Repo",    f"[link]{r.source.repo}[/link]")
+        meta_table.add_row("Script",  r.entrypoint.script)
+        console.print(meta_table)
+
+        # ── Hardware requirements ─────────────────────────────────────────
+        if local:
+            needs_gpu = local.requires_gpu
+            has_gpu = hw["device"] in ("cuda", "mps")
+            compat = (not needs_gpu) or has_gpu
+            colour = "green" if compat else "red"
+            gpu_str = (
+                f"[{colour}]{'✓' if compat else '✗'}[/{colour}] "
+                f"{'GPU required' if needs_gpu else 'GPU optional'}"
+                + (f" · {local.min_vram_gb} GB VRAM" if local.min_vram_gb else "")
+                + (f" · tested on: {', '.join(local.tested_on)}" if local.tested_on else "")
+            )
+            your_hw = (
+                f"Your hardware: [bold]{hw['device'].upper()}[/bold]"
+                + (f" ({hw['vram_gb']} GB)" if hw.get("vram_gb") else "")
+            )
+            console.print(f"\n[bold]Backend[/bold]  {gpu_str}")
+            console.print(f"         {your_hw}")
+
+        # ── Models ────────────────────────────────────────────────────────
+        if r.models:
+            console.print()
+            m_table = Table(title="Models", show_header=True, header_style="bold cyan")
+            m_table.add_column("Name",        style="cyan")
+            m_table.add_column("Source",      style="green")
+            m_table.add_column("ID / URL",    style="dim")
+            m_table.add_column("Size",        justify="right")
+            m_table.add_column("License",     style="dim")
+            for m in r.models:
+                m_table.add_row(
+                    m.name,
+                    m.source,
+                    m.id,
+                    f"{m.size_gb} GB" if m.size_gb else "—",
+                    m.license or "—",
+                )
+            console.print(m_table)
+
+        # ── Inputs ────────────────────────────────────────────────────────
+        if r.inputs:
+            console.print()
+            i_table = Table(title="Inputs", show_header=True, header_style="bold cyan")
+            i_table.add_column("Name",        style="cyan",    no_wrap=True)
+            i_table.add_column("Type",        style="green",   no_wrap=True)
+            i_table.add_column("Required",    justify="center")
+            i_table.add_column("Default",     style="yellow")
+            i_table.add_column("Range",       style="dim")
+            i_table.add_column("Description", style="dim")
+            for name, spec in r.inputs.items():
+                req = "[bold red]yes[/bold red]" if spec.required else "no"
+                rng = ""
+                if spec.min is not None or spec.max is not None:
+                    rng = f"{spec.min or ''}..{spec.max or ''}"
+                i_table.add_row(
+                    name,
+                    spec.type,
+                    req,
+                    str(spec.default) if spec.default is not None else "—",
+                    rng or "—",
+                    spec.description or "—",
+                )
+            console.print(i_table)
+
+        # ── Outputs ───────────────────────────────────────────────────────
+        if r.outputs:
+            console.print()
+            o_table = Table(title="Outputs", show_header=True, header_style="bold cyan")
+            o_table.add_column("Name", style="cyan")
+            o_table.add_column("Type", style="green")
+            o_table.add_column("Path", style="dim")
+            for o in r.outputs:
+                o_table.add_row(o.name, o.type, o.path or "—")
+            console.print(o_table)
+
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@cli.command()
 def accelerator():
     """Detect and display the best available compute accelerator.
 

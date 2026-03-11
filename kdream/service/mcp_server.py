@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, NoReturn
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 import kdream as k
 from kdream.exceptions import KdreamError
@@ -11,7 +12,6 @@ from kdream.exceptions import KdreamError
 
 def _tool_error(exc: KdreamError) -> NoReturn:
     """Re-raise a KdreamError as an MCP ToolError."""
-    from mcp.server.fastmcp.exceptions import ToolError
     raise ToolError(str(exc)) from exc
 
 
@@ -212,6 +212,63 @@ def create_mcp_server(host: str = "127.0.0.1", port: int = 8765) -> FastMCP:
             }
             for pkg in packages
         ]
+
+    # ── recipe_info ───────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def recipe_info(recipe: str) -> dict[str, Any]:
+        """Return full details about a recipe: inputs, outputs, models, backend requirements.
+
+        Args:
+            recipe: Registry name or local file path to a recipe.
+        """
+        try:
+            from kdream.core.runner import _resolve_recipe
+            r = _resolve_recipe(recipe)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+
+        local = r.backends.local
+        return {
+            "name": r.metadata.name,
+            "version": r.metadata.version,
+            "description": r.metadata.description,
+            "tags": r.metadata.tags,
+            "license": r.metadata.license,
+            "author": r.metadata.author,
+            "repo": r.source.repo,
+            "entrypoint": r.entrypoint.script,
+            "models": [
+                {
+                    "name": m.name,
+                    "source": m.source,
+                    "id": m.id,
+                    "size_gb": m.size_gb,
+                    "license": m.license,
+                }
+                for m in r.models
+            ],
+            "inputs": {
+                name: {
+                    "type": spec.type,
+                    "required": spec.required,
+                    "default": spec.default,
+                    "description": spec.description,
+                    "min": spec.min,
+                    "max": spec.max,
+                }
+                for name, spec in r.inputs.items()
+            },
+            "outputs": [
+                {"name": o.name, "type": o.type, "path": o.path}
+                for o in r.outputs
+            ],
+            "backend": {
+                "requires_gpu": local.requires_gpu if local else False,
+                "min_vram_gb": local.min_vram_gb if local else 0,
+                "tested_on": local.tested_on if local else [],
+            },
+        }
 
     # ── detect_accelerator ────────────────────────────────────────────────
 
