@@ -17,7 +17,7 @@ from kdream.core.runner import RunResult, PackageInfo, run, install, list_instal
 from kdream.backends.local import detect_accelerator
 from kdream.exceptions import KdreamError, RecipeError, RegistryError, BackendError
 
-__version__ = "0.10.3"
+__version__ = "0.10.4"
 
 
 def list_recipes(

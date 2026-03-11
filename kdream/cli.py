@@ -28,7 +28,7 @@ def cli():
     """
 
 
-@cli.command()
+@cli.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 @click.argument("recipe")
 @click.option("--backend", default="local", show_default=True,
               help="Compute backend (local|colab|runpod).")
