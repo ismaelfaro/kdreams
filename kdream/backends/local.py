@@ -142,53 +142,103 @@ class EnvironmentManager:
         extras: list[str] = [],
         verbose: bool = False,
     ) -> None:
-        """Install dependencies from requirements file into the venv."""
-        req_file = self._find_requirements(repo_path)
-        if not req_file:
-            console.print("  [yellow]No requirements file found — skipping dep install[/yellow]")
-            return
+        """Install ALL dependencies found in the repo into the venv.
 
-        console.print(f"  Installing deps from [cyan]{req_file.name}[/cyan] ...")
-
-        # Determine python binary
+        Installs in order:
+          1. Every requirements*.txt / requirements/*.txt found
+          2. The package itself via ``uv pip install .`` if setup.py or pyproject.toml exists
+          3. Any extra requirements files declared in the recipe
+        """
         python_bin = venv_path / "bin" / "python"
         if not python_bin.exists():
             python_bin = venv_path / "Scripts" / "python.exe"
 
-        cmd = ["uv", "pip", "install", "--python", str(python_bin), "-r", str(req_file)]
-        if extras:
-            for extra in extras:
-                cmd.extend(["-r", str(repo_path / extra)])
+        req_files = self._find_all_requirements(repo_path)
+        has_installable = (
+            (repo_path / "setup.py").exists()
+            or (repo_path / "pyproject.toml").exists()
+        )
 
-        if verbose:
-            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+        if not req_files and not has_installable and not extras:
+            console.print("  [yellow]No requirements found — skipping dep install[/yellow]")
+            return
 
-        if verbose:
-            # Stream output directly so uv's progress is visible
-            result = subprocess.run(cmd, cwd=str(repo_path), text=True)
-        else:
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_path))
-            if result.stdout.strip():
-                # Show a brief summary even in non-verbose mode
-                lines = result.stdout.strip().splitlines()
-                console.print(f"  [dim]{lines[-1]}[/dim]")
+        def _run(cmd: list[str], label: str) -> None:
+            if verbose:
+                console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+            if verbose:
+                result = subprocess.run(cmd, cwd=str(repo_path), text=True)
+            else:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, cwd=str(repo_path)
+                )
+                if result.stdout.strip():
+                    lines = result.stdout.strip().splitlines()
+                    console.print(f"  [dim]{lines[-1]}[/dim]")
+            if result.returncode != 0:
+                raise BackendError(
+                    f"Dependency installation failed ({label}):\n"
+                    + (result.stderr or "")
+                )
 
-        if result.returncode != 0:
-            raise BackendError(f"Dependency installation failed:\n{result.stderr}")
+        # 1. Install every requirements file
+        for req_file in req_files:
+            console.print(f"  Installing deps from [cyan]{req_file.name}[/cyan] ...")
+            _run(
+                ["uv", "pip", "install", "--python", str(python_bin), "-r", str(req_file)],
+                req_file.name,
+            )
+
+        # 2. Install the package itself if it is pip-installable
+        if has_installable:
+            console.print("  Installing package ([cyan]setup.py / pyproject.toml[/cyan]) ...")
+            _run(
+                ["uv", "pip", "install", "--python", str(python_bin), "-e", str(repo_path)],
+                "package install",
+            )
+
+        # 3. Extra requirements files declared in the recipe
+        for extra in extras:
+            extra_path = repo_path / extra
+            if extra_path.exists():
+                console.print(f"  Installing extra deps from [cyan]{extra}[/cyan] ...")
+                _run(
+                    ["uv", "pip", "install", "--python", str(python_bin), "-r", str(extra_path)],
+                    extra,
+                )
 
     @staticmethod
-    def _find_requirements(repo_path: Path) -> Path | None:
+    def _find_all_requirements(repo_path: Path) -> list[Path]:
+        """Return every requirements file present in the repository."""
+        # Explicit candidates checked first (in priority order)
         candidates = [
             "requirements.txt",
+            "requirements-base.txt",
+            "requirements-core.txt",
+            "requirements-torch.txt",
+            "requirements_torch.txt",
+            "requirements-gpu.txt",
+            "requirements-cuda.txt",
             "requirements/base.txt",
             "requirements/main.txt",
-            "requirements-base.txt",
+            "requirements/requirements.txt",
         ]
+        found: list[Path] = []
+        seen: set[Path] = set()
+
         for name in candidates:
             p = repo_path / name
-            if p.exists():
-                return p
-        return None
+            if p.exists() and p not in seen:
+                found.append(p)
+                seen.add(p)
+
+        # Also pick up any other requirements*.txt at the repo root not yet covered
+        for p in sorted(repo_path.glob("requirements*.txt")):
+            if p not in seen:
+                found.append(p)
+                seen.add(p)
+
+        return found
 
 
 # ---------------------------------------------------------------------------
