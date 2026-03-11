@@ -53,7 +53,7 @@ Verify the install:
 
 ```bash
 kdream --version
-# kdream, version 0.2.0
+# kdream, version 0.9.1
 ```
 
 ---
@@ -147,6 +147,59 @@ kdream cache info         # disk usage
 kdream cache clear        # clear all
 kdream cache clear --recipe stable-diffusion-xl-base  # clear one
 ```
+
+### Run as an MCP server (service mode)
+
+Expose all kdream capabilities as [Model Context Protocol](https://modelcontextprotocol.io/) tools so any MCP-compatible client (Claude Desktop, Cursor, etc.) can invoke them.
+
+```bash
+# Install service dependencies first
+uv pip install 'kdream[service]'
+
+# stdio transport — for Claude Desktop / Cursor
+kdream serve --transport stdio
+
+# HTTP transport — local MCP endpoint at http://127.0.0.1:8765/mcp
+kdream serve --transport http
+
+# HTTP + ngrok — public URL for remote access
+kdream serve --transport http --ngrok
+kdream serve --transport http --ngrok --ngrok-token <token>
+# or: export NGROK_AUTHTOKEN=<token>
+```
+
+The server exposes six tools: `run_recipe`, `install_recipe`, `list_recipes`, `generate_recipe`, `validate_recipe`, `list_installed`.
+
+### Run inference on a remote kdream server
+
+Connect to a `kdream serve` instance running on another machine (or via ngrok) and run inference remotely:
+
+```bash
+# Set the remote URL once
+export KDREAM_REMOTE_URL=https://abc123.ngrok.io/mcp
+
+# Run inference on the remote machine
+kdream remote run stable-diffusion-xl-base --prompt "red panda hacker"
+kdream remote run whisper-large-v3 --audio-file interview.mp3
+
+# Browse recipes available on the remote server
+kdream remote list --tag image-generation
+
+# List packages installed on the remote server
+kdream remote packages
+
+# Or pass --url per command (skips the env var)
+kdream remote run llama-3-8b-instruct \
+  --url http://192.168.1.10:8765/mcp \
+  --prompt "Explain transformers"
+```
+
+**Typical workflow — GPU machine → laptop:**
+
+| GPU machine | Your laptop |
+|---|---|
+| `kdream serve --transport http --ngrok` | `export KDREAM_REMOTE_URL=<ngrok-url>/mcp` |
+| Prints public ngrok URL | `kdream remote run stable-diffusion-xl-base --prompt "..."` |
 
 ---
 
@@ -246,6 +299,21 @@ kdream validate <recipe-file>
 kdream packages [--cache-dir TEXT]
 kdream cache info [--cache-dir TEXT]
 kdream cache clear [--recipe NAME] [--cache-dir TEXT]
+
+kdream serve [OPTIONS]                    # start MCP server (requires kdream[service])
+  --port INT              Port to bind  [default: 8765]
+  --host TEXT             Host to bind  [default: 127.0.0.1]
+  --transport [stdio|http]  MCP transport  [default: http]
+  --ngrok                 Expose publicly via ngrok tunnel
+  --ngrok-token TEXT      ngrok auth token (or NGROK_AUTHTOKEN env var)
+
+kdream remote run <recipe> --url URL [OPTIONS]   # run inference on a remote server
+  --url TEXT              Remote MCP server URL (or KDREAM_REMOTE_URL env var)
+  --prompt / --steps / --seed / --width / --height / --guidance-scale / --output-dir
+  --backend TEXT          Backend on the remote server  [default: local]
+
+kdream remote list --url URL [--tag TAG]... [--backend TEXT]
+kdream remote packages --url URL
 ```
 
 ---
@@ -277,6 +345,10 @@ kdream/
   ├── agents/
   │   ├── recipe_generator.py  # Multi-agent recipe generator (Claude)
   │   └── skills/              # Agent system prompt Markdown files
+  ├── service/           # MCP server & remote client (kdream[service])
+  │   ├── mcp_server.py  # FastMCP server with all kdream tools
+  │   ├── mcp_client.py  # Async MCP client (used by `kdream remote`)
+  │   └── ngrok_tunnel.py  # ngrok tunnel context manager
   └── recipes/           # Bundled recipes (shipped with the package)
       ├── image-generation/
       ├── text-generation/
@@ -293,6 +365,7 @@ kdream/
 git clone https://github.com/ismaelfaro/kdreams.git
 cd kdreams
 uv pip install -e ".[dev]"
+uv pip install "mcp>=1.6" "pyngrok>=7.0"   # optional: for service/remote features
 .venv/bin/python -m pytest tests/
 
 # Add a recipe

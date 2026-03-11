@@ -65,15 +65,15 @@ class TestEnvironmentManager:
             env_mgr.create_venv(venv_path)
             mock_run.assert_not_called()
 
-    def test_find_requirements_txt(self, tmp_path):
+    def test_find_all_requirements_txt(self, tmp_path):
         (tmp_path / "requirements.txt").write_text("torch\n")
-        result = EnvironmentManager._find_requirements(tmp_path)
-        assert result is not None
-        assert result.name == "requirements.txt"
+        result = EnvironmentManager._find_all_requirements(tmp_path)
+        assert len(result) == 1
+        assert result[0].name == "requirements.txt"
 
-    def test_find_requirements_returns_none_when_absent(self, tmp_path):
-        result = EnvironmentManager._find_requirements(tmp_path)
-        assert result is None
+    def test_find_all_requirements_returns_none_when_absent(self, tmp_path):
+        result = EnvironmentManager._find_all_requirements(tmp_path)
+        assert result == []
 
 
 class TestModelManager:

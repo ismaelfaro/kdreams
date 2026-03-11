@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 
 async def _call_tool(url: str, tool: str, arguments: dict[str, Any]) -> Any:
     """Connect to a remote MCP server and call a single tool."""
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
 
     async with streamablehttp_client(url) as (read, write, _):
         async with ClientSession(read, write) as session:
@@ -19,8 +21,6 @@ async def _call_tool(url: str, tool: str, arguments: dict[str, Any]) -> Any:
     if not result.content:
         return {}
 
-    # FastMCP returns JSON-encoded text for dict/list results
-    import json
     text_parts = [c.text for c in result.content if hasattr(c, "text")]
     if not text_parts:
         return {}

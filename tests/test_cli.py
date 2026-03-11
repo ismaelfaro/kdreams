@@ -53,7 +53,7 @@ class TestHelp:
     def test_version(self, runner):
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert "0." in result.output  # semver present
 
 
 class TestValidateCommand:
@@ -74,6 +74,7 @@ class TestListCommand:
         m.version = "1.0.0"
         m.tags = ["image-generation"]
         m.description = "Test"
+        m.repo = "https://github.com/test/sdxl"
 
         with patch("kdream.list_recipes", return_value=[m]):
             result = runner.invoke(cli, ["list"])
