@@ -1,0 +1,73 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: stable-diffusion-xl-base
+  version: 1.0.0
+  description: Text-to-image generation with SDXL 1.0 — photorealistic images from text prompts
+  tags: [image-generation, diffusion, text-to-image, sdxl]
+  license: Apache-2.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/Stability-AI/generative-models
+  ref: main
+  install_extras: []
+
+models:
+  - name: sdxl-base-1.0
+    source: huggingface
+    id: stabilityai/stable-diffusion-xl-base-1.0
+    destination: models/sdxl-base
+
+entrypoint:
+  script: scripts/demo/sampling.py
+  type: python
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the image to generate
+  negative_prompt:
+    type: string
+    default: ""
+    description: What to exclude from the generated image
+  steps:
+    type: integer
+    default: 30
+    min: 1
+    max: 150
+    description: Number of diffusion sampling steps
+  guidance_scale:
+    type: float
+    default: 7.5
+    min: 0.0
+    max: 30.0
+    description: How closely to follow the prompt (classifier-free guidance scale)
+  width:
+    type: integer
+    default: 1024
+    min: 512
+    max: 2048
+    description: Output image width in pixels
+  height:
+    type: integer
+    default: 1024
+    min: 512
+    max: 2048
+    description: Output image height in pixels
+  seed:
+    type: integer
+    default: -1
+    description: Random seed for reproducibility (-1 for random)
+
+outputs:
+  - name: image
+    type: file
+    path: outputs/{timestamp}.png
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 8
+    tested_on: [cuda, mps]

@@ -1,0 +1,53 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: whisper-large-v3
+  version: 1.0.0
+  description: OpenAI Whisper large-v3 for highly accurate multilingual speech transcription
+  tags: [audio, transcription, speech-to-text, whisper, multilingual]
+  license: MIT
+  author: kdream-community
+
+source:
+  repo: https://github.com/openai/whisper
+  ref: main
+  install_extras: []
+
+models:
+  - name: whisper-large-v3
+    source: huggingface
+    id: openai/whisper-large-v3
+    destination: models/whisper-large-v3
+
+entrypoint:
+  script: whisper/__main__.py
+  type: cli
+
+inputs:
+  audio_file:
+    type: string
+    required: true
+    description: Path to the audio file to transcribe (mp3, wav, m4a, etc.)
+  language:
+    type: string
+    default: ""
+    description: Language code (e.g. 'en', 'fr', 'de'). Empty for auto-detect.
+  task:
+    type: string
+    default: transcribe
+    description: Task to perform ('transcribe' or 'translate' to English)
+  output_format:
+    type: string
+    default: txt
+    description: Output format (txt, vtt, srt, tsv, json)
+
+outputs:
+  - name: transcript
+    type: file
+    path: outputs/{timestamp}.txt
+
+backends:
+  local:
+    requires_gpu: false
+    min_vram_gb: 0
+    tested_on: [cuda, mps, cpu]

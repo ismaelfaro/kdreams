@@ -1,0 +1,74 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: z-image-turbo
+  version: 1.0.0
+  description: Text-to-image generation using Z-Image-Turbo, a distilled 6B parameter
+    single-stream diffusion transformer with bilingual (English/Chinese) support
+  tags:
+  - image-generation
+  - diffusion
+  - transformer
+  - text-to-image
+  - open-source
+  - research
+  license: unknown
+  author: kdream-community
+source:
+  repo: https://github.com/Tongyi-MAI/Z-Image
+  ref: main
+  install_extras: []
+models:
+- name: Z-Image-Turbo
+  source: huggingface
+  id: Tongyi-MAI/Z-Image-Turbo
+  destination: ckpts/Z-Image-Turbo
+- name: Z-Image
+  source: huggingface
+  id: Tongyi-MAI/Z-Image
+  destination: ckpts/Z-Image
+entrypoint:
+  script: inference.py
+  type: python
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the image to generate (supports English and Chinese)
+  width:
+    type: integer
+    required: false
+    default: 1024
+    description: Output image width in pixels
+  height:
+    type: integer
+    required: false
+    default: 1024
+    description: Output image height in pixels
+  steps:
+    type: integer
+    required: false
+    default: 8
+    description: Number of diffusion inference steps (8 is optimal for the Turbo distilled
+      model)
+  guidance_scale:
+    type: float
+    required: false
+    default: 0.0
+    description: Classifier-free guidance scale (use 0.0 for Z-Image-Turbo; higher
+      values for base Z-Image)
+  seed:
+    type: integer
+    required: false
+    default: 42
+    description: Random seed for reproducibility (-1 for random)
+outputs:
+- name: result
+  type: file
+  path: outputs/{timestamp}.png
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 16
+    tested_on:
+    - cuda

@@ -1,0 +1,69 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: musicgen-large
+  version: 1.0.0
+  description: Meta's MusicGen large model for text-conditioned music generation
+  tags: [audio, music-generation, text-to-music, meta, musicgen]
+  license: CC-BY-NC-4.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/facebookresearch/audiocraft
+  ref: main
+  install_extras: []
+
+models:
+  - name: musicgen-large
+    source: huggingface
+    id: facebook/musicgen-large
+    destination: models/musicgen-large
+
+entrypoint:
+  script: demos/musicgen_app.py
+  type: python
+
+inputs:
+  description:
+    type: string
+    required: true
+    description: Text description of the music to generate
+  duration:
+    type: integer
+    default: 10
+    min: 1
+    max: 120
+    description: Duration of generated audio in seconds
+  top_k:
+    type: integer
+    default: 250
+    min: 1
+    max: 1000
+    description: Top-k sampling parameter
+  top_p:
+    type: float
+    default: 0.0
+    min: 0.0
+    max: 1.0
+    description: Top-p sampling (0 to disable)
+  temperature:
+    type: float
+    default: 1.0
+    min: 0.1
+    max: 2.0
+    description: Sampling temperature
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: audio
+    type: file
+    path: outputs/{timestamp}.wav
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 16
+    tested_on: [cuda]
