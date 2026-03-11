@@ -343,6 +343,29 @@ def validate(recipe_file):
         sys.exit(1)
 
 
+def _input_example(name: str, spec) -> str:
+    """Return a short example value string for an input spec."""
+    if spec.default is not None:
+        return str(spec.default)
+    t = spec.type
+    if t == "string":
+        # guess a sensible placeholder from the name
+        if any(k in name for k in ("prompt",)):
+            return '"your prompt here"'
+        if any(k in name for k in ("input", "file", "image", "video", "audio", "path")):
+            return "<path/to/file>"
+        if any(k in name for k in ("dir", "output")):
+            return "<output/dir>"
+        return f"<{name}>"
+    if t in ("integer", "int"):
+        return str(spec.min or 1)
+    if t in ("float", "number"):
+        return str(spec.min or 1.0)
+    if t == "boolean":
+        return "true"
+    return f"<{name}>"
+
+
 @cli.command()
 @click.argument("recipe")
 def info(recipe):
@@ -458,6 +481,26 @@ def info(recipe):
             for o in r.outputs:
                 o_table.add_row(o.name, o.type, o.path or "—")
             console.print(o_table)
+
+        # ── How to run ────────────────────────────────────────────────────
+        console.print()
+        required_inputs = {n: s for n, s in r.inputs.items() if s.required}
+        optional_inputs = {n: s for n, s in r.inputs.items() if not s.required}
+
+        parts = [f"[bold]kdream run[/bold] [cyan]{r.metadata.name}[/cyan]"]
+        for name, spec in required_inputs.items():
+            example_val = _input_example(name, spec)
+            parts.append(f"[yellow]--{name.replace('_', '-')}[/yellow] {example_val}")
+        for name, spec in optional_inputs.items():
+            example_val = _input_example(name, spec)
+            parts.append(f"[dim]--{name.replace('_', '-')} {example_val}[/dim]")
+
+        console.print(Panel(
+            " ".join(parts),
+            title="How to run",
+            expand=False,
+            border_style="dim",
+        ))
 
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
