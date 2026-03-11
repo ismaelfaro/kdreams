@@ -419,8 +419,13 @@ class InferenceRunner:
         recipe: Recipe,
         stdout: str,
         cwd: Path,
+        run_start: float = 0.0,
     ) -> dict[str, str]:
-        """Collect outputs from file globs or stdout."""
+        """Collect outputs from file globs or stdout.
+
+        Falls back to searching for files created after *run_start* when a
+        recipe's output path pattern doesn't match the actual output location.
+        """
         import datetime
         import glob as glob_mod
 
@@ -436,14 +441,49 @@ class InferenceRunner:
                 if matches:
                     outputs[out_spec.name] = matches[-1]
                 else:
-                    outputs[out_spec.name] = str(cwd / out_spec.path.replace("{timestamp}", ts))
+                    # Pattern missed — look for any recently created output file
+                    recent = self._find_recent_files(cwd, run_start)
+                    if recent:
+                        outputs[out_spec.name] = recent[-1]
+                    else:
+                        # Return expected path so caller knows where to look
+                        outputs[out_spec.name] = str(
+                            cwd / out_spec.path.replace("{timestamp}", ts)
+                        )
             else:
                 outputs[out_spec.name] = stdout.strip()
 
         if not outputs:
-            outputs["stdout"] = stdout.strip()
+            # No output spec — check for any new files produced
+            recent = self._find_recent_files(cwd, run_start)
+            if recent:
+                outputs["result"] = recent[-1]
+            else:
+                outputs["stdout"] = stdout.strip()
 
         return outputs
+
+    _OUTPUT_EXTENSIONS = {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+        ".mp4", ".avi", ".mov", ".mkv",
+        ".wav", ".mp3", ".flac", ".ogg",
+        ".json", ".txt",
+    }
+
+    def _find_recent_files(self, search_root: Path, since: float) -> list[str]:
+        """Return paths of files under *search_root* created after *since* (epoch seconds)."""
+        found: list[str] = []
+        for p in search_root.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in self._OUTPUT_EXTENSIONS:
+                continue
+            try:
+                if p.stat().st_mtime >= since:
+                    found.append(str(p))
+            except OSError:
+                pass
+        return sorted(found)
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +611,11 @@ class LocalBackend(AbstractBackend):
         else:
             console.print(f"  Running: [dim]{' '.join(cmd[:4])}…[/dim]")
 
+        import os
+        import shutil
+        import time
+
+        run_start = time.time()
         rc, stdout, stderr = self.runner.execute(cmd, cwd=package.repo_path)
 
         if self.verbose:
@@ -587,7 +632,27 @@ class LocalBackend(AbstractBackend):
             console.print(stderr[-3000:].rstrip())
             raise BackendError(f"Inference failed (exit code {rc}).")
 
-        return self.runner.collect_output(recipe, stdout, package.repo_path)
+        raw_outputs = self.runner.collect_output(
+            recipe, stdout, package.repo_path, run_start
+        )
+
+        # Copy file outputs to the directory where the user ran kdream
+        dest_dir = Path(inputs.get("output_dir", os.getcwd()))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        final_outputs: dict[str, Any] = {}
+        for name, value in raw_outputs.items():
+            src = Path(value)
+            if src.exists() and src.is_file():
+                dest = dest_dir / src.name
+                if src.resolve() != dest.resolve():
+                    shutil.copy2(str(src), str(dest))
+                final_outputs[name] = str(dest)
+                console.print(f"  Saved: [cyan]{dest}[/cyan]")
+            else:
+                final_outputs[name] = value
+
+        return final_outputs
 
     def is_installed(self, recipe_name: str, cache_dir: Path) -> bool:
         pkg_dir = cache_dir / recipe_name
