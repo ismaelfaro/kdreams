@@ -60,6 +60,8 @@ class EntrypointSpec(BaseModel):
     script: str
     type: Literal["python", "cli", "gradio", "fastapi"] = "python"
     args_template: str | None = None
+    args_mapping: dict[str, str] = {}      # recipe input name → script variable name
+    generated_wrapper: bool = False        # True when kdream generated the entrypoint script
 
 
 class RecipeMetadata(BaseModel):

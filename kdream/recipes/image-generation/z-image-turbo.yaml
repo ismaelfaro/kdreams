@@ -28,8 +28,9 @@ models:
   id: Tongyi-MAI/Z-Image
   destination: ckpts/Z-Image
 entrypoint:
-  script: inference.py
+  script: _kdream_runner.py
   type: python
+  generated_wrapper: true
 inputs:
   prompt:
     type: string

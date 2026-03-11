@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -522,7 +523,6 @@ class LocalBackend(AbstractBackend):
         models_path.mkdir(parents=True, exist_ok=True)
 
         if force_reinstall and pkg_dir.exists():
-            import shutil
             shutil.rmtree(pkg_dir)
             pkg_dir.mkdir(parents=True, exist_ok=True)
             models_path.mkdir(parents=True, exist_ok=True)
@@ -617,7 +617,6 @@ class LocalBackend(AbstractBackend):
             console.print(f"  Running: [dim]{' '.join(cmd[:4])}…[/dim]")
 
         import os
-        import shutil
         import time
 
         run_start = time.time()
@@ -663,12 +662,37 @@ class LocalBackend(AbstractBackend):
     # CLI wrapper generation
     # ------------------------------------------------------------------
 
+    def _find_bundled_wrapper(self, recipe: Recipe) -> Path | None:
+        """Return the companion *_runner.py path bundled alongside the recipe YAML,
+        or None if no companion script exists."""
+        bundled_dir = Path(__file__).parent.parent / "recipes"
+        for yaml_path in bundled_dir.rglob("*.yaml"):
+            if yaml_path.stem == recipe.metadata.name:
+                companion = yaml_path.parent / f"{recipe.metadata.name}_runner.py"
+                if companion.exists():
+                    return companion
+        return None
+
     def _ensure_cli_wrapper(self, recipe: Recipe, package) -> Path | None:
         """Return a wrapper script path when the inference script has no CLI
         argument support, otherwise return None (use the original script).
 
-        The wrapper is generated once at run time and cached in the repo dir.
+        Priority:
+        1. If the recipe already points to a generated wrapper (generated_wrapper=True)
+           and the script is a bundled companion — copy it to the repo and use it.
+        2. If a bundled companion *_runner.py exists — copy it to the repo.
+        3. Fall back to AST-patching the original script.
         """
+        wrapper_dest = package.repo_path / "_kdream_runner.py"
+
+        # ── Case 1 & 2: bundled companion script ────────────────────────
+        bundled = self._find_bundled_wrapper(recipe)
+        if bundled:
+            console.print("  [dim]Copying bundled CLI runner to repo…[/dim]")
+            shutil.copy2(bundled, wrapper_dest)
+            return wrapper_dest
+
+        # ── Case 3: AST-patch the original script ───────────────────────
         script_path = package.repo_path / recipe.entrypoint.script
         if not script_path.exists():
             return None
@@ -684,12 +708,11 @@ class LocalBackend(AbstractBackend):
         if any(ind in source for ind in cli_indicators):
             return None
 
-        wrapper_path = package.repo_path / "_kdream_runner.py"
         console.print("  [dim]Patching inference script to accept CLI inputs…[/dim]")
         wrapper_source = self._build_cli_wrapper(recipe, script_path, source)
-        wrapper_path.write_text(wrapper_source, encoding="utf-8")
+        wrapper_dest.write_text(wrapper_source, encoding="utf-8")
 
-        return wrapper_path
+        return wrapper_dest
 
     def _build_cli_wrapper(
         self, recipe: Recipe, script_path: Path, source: str
@@ -717,26 +740,37 @@ class LocalBackend(AbstractBackend):
             else:
                 arg_lines.append(f'_kp.add_argument("--{flag}", type=str, default=None)')
 
-        # ── AST scan: find top-level assignments matching input names ────
-        input_names = set(recipe.inputs.keys())
+        # ── Build name mappings ──────────────────────────────────────────
+        # args_mapping: recipe input name → script variable name (e.g. steps → num_inference_steps)
+        args_mapping = recipe.entrypoint.args_mapping  # dict[str, str]
+        # recipe_name → script_var (identity if no mapping)
+        input_to_script: dict[str, str] = {
+            name: args_mapping.get(name, name) for name in recipe.inputs
+        }
+        # script_var → recipe_name (reverse)
+        script_to_input: dict[str, str] = {v: k for k, v in input_to_script.items()}
+        script_varnames = set(input_to_script.values())
+
+        # ── AST scan: find assignments at ANY depth matching script var names ──
         # end_lineno → list of override statements to insert after that line
         overrides: dict[int, list[str]] = {}
         try:
             tree = ast.parse(source)
-            for node in tree.body:
+            for node in ast.walk(tree):
                 if not isinstance(node, ast.Assign):
                     continue
                 for target in node.targets:
-                    if not (isinstance(target, ast.Name) and target.id in input_names):
+                    if not (isinstance(target, ast.Name) and target.id in script_varnames):
                         continue
-                    varname = target.id
-                    spec = recipe.inputs[varname]
+                    script_var = target.id
+                    recipe_name = script_to_input[script_var]
+                    spec = recipe.inputs[recipe_name]
                     cast = {"integer": "int", "float": "float", "boolean": "bool"}.get(
                         spec.type, "str"
                     )
                     override = (
-                        f"if _kdream_args.get('{varname}') is not None: "
-                        f"{varname} = {cast}(_kdream_args['{varname}'])"
+                        f"if _kdream_args.get('{recipe_name}') is not None: "
+                        f"{script_var} = {cast}(_kdream_args['{recipe_name}'])"
                     )
                     if node.end_lineno is not None:
                         overrides.setdefault(node.end_lineno, []).append(override)
@@ -749,7 +783,10 @@ class LocalBackend(AbstractBackend):
         for i, line in enumerate(src_lines, start=1):
             patched.append(line)
             if i in overrides:
-                patched.extend(overrides[i])
+                # Match indentation of the assignment so overrides stay in the
+                # correct scope (e.g. inside a function body)
+                indent = " " * (len(line) - len(line.lstrip()))
+                patched.extend(indent + ov for ov in overrides[i])
         patched_source = "\n".join(patched)
 
         # ── Preamble ─────────────────────────────────────────────────────
