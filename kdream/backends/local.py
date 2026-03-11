@@ -702,7 +702,6 @@ class LocalBackend(AbstractBackend):
            each one, so CLI values win over hardcoded defaults.
         """
         import ast
-        import textwrap
 
         # ── argparse declarations ────────────────────────────────────────
         arg_lines: list[str] = []
@@ -755,23 +754,24 @@ class LocalBackend(AbstractBackend):
         patched_source = "\n".join(patched)
 
         # ── Preamble ─────────────────────────────────────────────────────
-        arg_block = "\n".join(arg_lines)
-        preamble = textwrap.dedent(f"""\
-            \"\"\"kdream CLI wrapper for {recipe.metadata.name} — auto-generated.\"\"\"
-            import argparse as _kap
-            import os as _kos
-            _kos.chdir({repr(str(script_path.parent))})
-            __file__ = {repr(str(script_path))}
-            _kp = _kap.ArgumentParser()
-            {arg_block}
-            _kdream_args = {{
-                k.replace("-", "_"): v
-                for k, v in vars(_kp.parse_known_args()[0]).items()
-                if v is not None
-            }}
-
-            # ── Original script (patched with CLI overrides) ──
-        """)
+        preamble_lines = [
+            f'"""kdream CLI wrapper for {recipe.metadata.name} — auto-generated."""',
+            "import argparse as _kap",
+            "import os as _kos",
+            f"_kos.chdir({repr(str(script_path.parent))})",
+            f"__file__ = {repr(str(script_path))}",
+            "_kp = _kap.ArgumentParser()",
+            *arg_lines,
+            "_kdream_args = {",
+            '    k.replace("-", "_"): v',
+            "    for k, v in vars(_kp.parse_known_args()[0]).items()",
+            "    if v is not None",
+            "}",
+            "",
+            "# ── Original script (patched with CLI overrides) ──",
+            "",
+        ]
+        preamble = "\n".join(preamble_lines) + "\n"
 
         return preamble + patched_source
 
