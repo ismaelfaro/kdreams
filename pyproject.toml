@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kdream"
-version = "0.2.0"
+version = "0.3.0"
 description = "A Python library for orchestrating AI model workflows and recipes across multiple backends."
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
