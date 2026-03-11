@@ -685,10 +685,9 @@ class LocalBackend(AbstractBackend):
             return None
 
         wrapper_path = package.repo_path / "_kdream_runner.py"
-        if not wrapper_path.exists():
-            console.print("  [dim]Patching inference script to accept CLI inputs…[/dim]")
-            wrapper_source = self._build_cli_wrapper(recipe, script_path, source)
-            wrapper_path.write_text(wrapper_source, encoding="utf-8")
+        console.print("  [dim]Patching inference script to accept CLI inputs…[/dim]")
+        wrapper_source = self._build_cli_wrapper(recipe, script_path, source)
+        wrapper_path.write_text(wrapper_source, encoding="utf-8")
 
         return wrapper_path
 
