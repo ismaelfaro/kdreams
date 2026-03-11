@@ -12,6 +12,7 @@ result = kdream.run(
     backend="local",                      # local | colab | runpod
     cache_dir=None,                       # override ~/.kdream/cache
     force_reinstall=False,
+    verbose=False,                        # stream subprocess output
     prompt="a red panda hacker",
     steps=40,
     seed=42,
@@ -38,6 +39,7 @@ pkg = kdream.install(
     recipe="stable-diffusion-xl-base",
     backend="local",
     cache_dir=None,
+    verbose=False,   # stream subprocess output
 )
 pkg.path         # Path to installation directory
 pkg.ready        # True when all models downloaded
@@ -103,15 +105,20 @@ kdream run <recipe> [OPTIONS]
   --backend TEXT          local|colab|runpod [default: local]
   --cache-dir TEXT        Override cache directory
   --force-reinstall       Force re-install
+  --verbose, -v           Stream subprocess output (uv logs, commands, stderr)
   --prompt TEXT           Text prompt
+  --negative-prompt TEXT  Negative prompt
   --steps INT             Inference steps
+  --guidance-scale FLOAT  Guidance scale
   --seed INT              Random seed
   --width/--height INT    Image dimensions
+  --output-dir TEXT       Directory to save outputs
   -- KEY VALUE            Any additional recipe input
 
-kdream install <recipe>
+kdream install <recipe> [--verbose, -v]
 kdream list [--tag TAG] [--search QUERY]
 kdream generate --repo URL [--output FILE]
+  # When --output is omitted, auto-saves to ./recipes/<category>/<name>.yaml
 kdream validate <file>
 kdream packages
 kdream cache info

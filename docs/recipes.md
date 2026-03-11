@@ -99,6 +99,11 @@ Description of what this model does.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
+
+# Auto-saves to ./recipes/<category>/<name>.yaml based on detected tags
+kdream generate --repo https://github.com/owner/ai-repo
+
+# Or specify an explicit output path
 kdream generate --repo https://github.com/owner/ai-repo --output my-recipe.yaml
 ```
 
@@ -153,7 +158,8 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full workflow.
 **TL;DR:**
 
 ```bash
-kdream generate --repo <github-url> --output recipes/<category>/<name>.yaml
+# Generate — auto-saves to ./recipes/<category>/<name>.yaml
+kdream generate --repo <github-url>
 kdream validate recipes/<category>/<name>.yaml
 # open PR
 ```

@@ -23,14 +23,14 @@ pip install kdream
 ### From GitHub (latest)
 
 ```bash
-pip install git+https://github.com/kdream-community/kdream.git
+pip install git+https://github.com/ismaelfaro/kdreams.git
 ```
 
 ### From a local clone
 
 ```bash
-git clone https://github.com/kdream-community/kdream.git
-cd kdream
+git clone https://github.com/ismaelfaro/kdreams.git
+cd kdreams
 pip install -e .
 ```
 
@@ -41,11 +41,11 @@ pip install -e .
 uv add kdream
 
 # from GitHub
-uv add git+https://github.com/kdream-community/kdream.git
+uv add git+https://github.com/ismaelfaro/kdreams.git
 
 # from local clone
-git clone https://github.com/kdream-community/kdream.git
-cd kdream
+git clone https://github.com/ismaelfaro/kdreams.git
+cd kdreams
 uv pip install -e .
 ```
 
@@ -53,7 +53,7 @@ Verify the install:
 
 ```bash
 kdream --version
-# kdream, version 0.1.0
+# kdream, version 0.2.0
 ```
 
 ---
@@ -88,12 +88,15 @@ kdream run stable-diffusion-xl-base \
   --seed 42 \
   --width 1024 \
   --height 1024
+
+# Show detailed progress (uv output, subprocess commands)
+kdream run whisper-large-v3 --audio-file interview.mp3 --verbose
 ```
 
 ### Run from a local recipe file
 
 ```bash
-kdream run ./recipes/image-generation/stable-diffusion-xl-base.yaml \
+kdream run ./kdream/recipes/image-generation/stable-diffusion-xl-base.yaml \
   --prompt "a red panda hacker"
 
 # or a relative path
@@ -106,6 +109,9 @@ kdream run ./my-recipe.yaml --prompt "test"
 # Download repo + weights ahead of time
 kdream install stable-diffusion-xl-base
 kdream install whisper-large-v3
+
+# Show detailed install progress
+kdream install llama-3-8b-instruct --verbose
 ```
 
 ### Generate a recipe from any GitHub repo
@@ -114,7 +120,10 @@ kdream install whisper-large-v3
 # Requires ANTHROPIC_API_KEY
 export ANTHROPIC_API_KEY=sk-ant-...
 
+# Auto-saves to ./recipes/<category>/<name>.yaml
 kdream generate --repo https://github.com/Tongyi-MAI/Z-Image
+
+# Or specify an explicit output path
 kdream generate --repo https://github.com/nikopueringer/CorridorKey --output ./my-recipe.yaml
 ```
 
@@ -153,13 +162,14 @@ result = kdream.run(
     steps=40,
     guidance_scale=8.0,
     seed=42,
+    verbose=False,                        # set True to stream subprocess output
 )
 print(result.outputs["image"])   # /path/to/output.png
 print(result.metadata)           # {"backend": "local", "duration_s": 12.3, ...}
 
 # Run from a local file
 result = kdream.run(
-    recipe="./recipes/image-generation/stable-diffusion-xl-base.yaml",
+    recipe="./kdream/recipes/image-generation/stable-diffusion-xl-base.yaml",
     prompt="test",
 )
 
@@ -172,10 +182,9 @@ print(pkg.ready)   # True
 for r in kdream.list_recipes(tags=["audio"]):
     print(r.name, r.description)
 
-# Generate a recipe with AI agents
+# Generate a recipe with AI agents (auto-saves to ./recipes/<category>/<name>.yaml)
 recipe = kdream.generate_recipe(
     repo="https://github.com/Tongyi-MAI/Z-Image",
-    output="./my-recipes/z-image.yaml",
 )
 ```
 
@@ -186,7 +195,7 @@ recipe = kdream.generate_recipe(
 ```
 kdream run stable-diffusion-xl-base --prompt "..."
       │
-      ├─ 1. Recipe Resolution    → registry name or ./local/path.yaml
+      ├─ 1. Recipe Resolution    → GitHub registry → bundled package recipes
       ├─ 2. Dependency Install   → uv venv + uv pip install (isolated per recipe)
       ├─ 3. Model Download       → HuggingFace / CIVITAI / URL
       ├─ 4. Backend Selection    → local GPU / Colab / RunPod (roadmap)
@@ -204,6 +213,7 @@ Second run is fast — repo, venv, and weights are cached at `~/.kdream/cache/`.
 |--------|----------|------|-------------|
 | `stable-diffusion-xl-base` | image-generation | 8 GB | SDXL 1.0 text-to-image |
 | `flux-1-dev` | image-generation | 16 GB | FLUX.1 [dev] by Black Forest Labs |
+| `z-image-turbo` | image-generation | 8 GB | Z-Image fast text-to-image |
 | `llama-3-8b-instruct` | text-generation | 16 GB | Meta Llama 3.1 8B chat |
 | `mistral-7b-v03` | text-generation | 14 GB | Mistral 7B instruction-tuned |
 | `whisper-large-v3` | audio | CPU | OpenAI Whisper transcription |
@@ -219,6 +229,7 @@ kdream run <recipe> [OPTIONS]
   --backend TEXT          Compute backend: local|colab|runpod  [default: local]
   --cache-dir TEXT        Override default cache (~/.kdream/cache)
   --force-reinstall       Force re-install even if cached
+  --verbose, -v           Stream subprocess output (uv logs, commands, stderr)
   --prompt TEXT           Text prompt
   --negative-prompt TEXT  Negative prompt
   --steps INT             Inference steps
@@ -227,9 +238,10 @@ kdream run <recipe> [OPTIONS]
   --width / --height INT  Output dimensions
   -- KEY VALUE            Any additional recipe input
 
-kdream install <recipe> [--backend TEXT] [--cache-dir TEXT]
+kdream install <recipe> [--backend TEXT] [--cache-dir TEXT] [--verbose, -v]
 kdream list [--tag TAG]... [--backend TEXT] [--search TEXT]
 kdream generate --repo URL [--output FILE] [--publish]
+  # --output omitted: auto-saves to ./recipes/<category>/<name>.yaml
 kdream validate <recipe-file>
 kdream packages [--cache-dir TEXT]
 kdream cache info [--cache-dir TEXT]
@@ -262,9 +274,14 @@ kdream/
   │   ├── local.py       # ✅ Local GPU/CPU (Phase 1)
   │   ├── colab.py       # 🔜 Google Colab (Phase 2)
   │   └── runpod.py      # 🔜 RunPod.io (Phase 3)
-  └── agents/
-      ├── recipe_generator.py  # Multi-agent recipe generator (Claude)
-      └── skills/              # Agent system prompt Markdown files
+  ├── agents/
+  │   ├── recipe_generator.py  # Multi-agent recipe generator (Claude)
+  │   └── skills/              # Agent system prompt Markdown files
+  └── recipes/           # Bundled recipes (shipped with the package)
+      ├── image-generation/
+      ├── text-generation/
+      ├── audio/
+      └── video-generation/
 ```
 
 ---
@@ -273,14 +290,15 @@ kdream/
 
 ```bash
 # Dev setup
-git clone https://github.com/kdream-community/kdream.git
-cd kdream
+git clone https://github.com/ismaelfaro/kdreams.git
+cd kdreams
 uv pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/
 
 # Add a recipe
-kdream generate --repo https://github.com/owner/repo --output recipes/<category>/name.yaml
-kdream validate recipes/<category>/name.yaml
+kdream generate --repo https://github.com/owner/repo
+# Generated recipe auto-saved to kdream/recipes/<category>/name.yaml
+kdream validate kdream/recipes/<category>/name.yaml
 # open PR
 ```
 

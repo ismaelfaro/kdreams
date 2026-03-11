@@ -12,16 +12,16 @@ from kdream.core.recipe import Recipe, RecipeMetadata, parse_yaml_recipe
 from kdream.exceptions import RegistryError
 
 REGISTRY_BASE_URL = (
-    "https://raw.githubusercontent.com/kdream-community/kdream/main/recipes"
+    "https://raw.githubusercontent.com/ismaelfaro/kdreams/main/recipes"
 )
 REGISTRY_API_URL = (
-    "https://api.github.com/repos/kdream-community/kdream/contents/recipes"
+    "https://api.github.com/repos/ismaelfaro/kdreams/contents/recipes"
 )
 LOCAL_CACHE = Path.home() / ".kdream" / "registry_cache"
 CACHE_TTL_SECONDS = 3600  # 1 hour
 
-# Bundled recipes shipped with the package (recipes/ at repo root)
-_BUNDLED_RECIPES_DIR = Path(__file__).parent.parent.parent / "recipes"
+# Bundled recipes shipped with the package (kdream/recipes/ inside the package)
+_BUNDLED_RECIPES_DIR = Path(__file__).parent.parent / "recipes"
 
 
 class RegistryClient:
@@ -55,23 +55,19 @@ class RegistryClient:
         return all_recipes
 
     def fetch_recipe(self, name: str) -> Recipe:
-        """Fetch a recipe by name — checks bundled recipes, cache, then GitHub."""
+        """Fetch a recipe by name — checks cache, then GitHub, then bundled package recipes."""
         # Support local paths
         if name.startswith(".") or name.startswith("/"):
             from kdream.core.recipe import load_recipe
             return load_recipe(name)
 
-        # 1. Check bundled recipes (shipped with the package)
-        bundled = self._find_bundled(name)
-        if bundled:
-            return parse_yaml_recipe(bundled.read_text())
-
-        # 2. Check local download cache
         cached = self._cache_dir / f"{name}.yaml"
+
+        # 1. Check local download cache (fresh)
         if cached.exists() and self._is_fresh(cached):
             return parse_yaml_recipe(cached.read_text())
 
-        # 3. Try to fetch from GitHub
+        # 2. Try to fetch from GitHub (online first)
         categories = [
             "image-generation", "text-generation", "audio",
             "video-generation", "3d", "multimodal",
@@ -86,6 +82,11 @@ class RegistryClient:
                     return parse_yaml_recipe(content)
             except httpx.RequestError:
                 continue
+
+        # 3. Fall back to bundled recipes shipped with the package
+        bundled = self._find_bundled(name)
+        if bundled:
+            return parse_yaml_recipe(bundled.read_text())
 
         # 4. Stale cache is better than nothing
         if cached.exists():
