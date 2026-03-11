@@ -15,7 +15,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.7.0", prog_name="kdream")
+@click.version_option(version="0.8.0", prog_name="kdream")
 def cli():
     """kdream — Run any AI model with a single command.
 
