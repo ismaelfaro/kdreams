@@ -15,7 +15,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.9.1", prog_name="kdream")
+@click.version_option(version="0.10.0", prog_name="kdream")
 def cli():
     """kdream — Run any AI model with a single command.
 
@@ -196,23 +196,32 @@ def list_recipes(tags, backend, search):
 
 
 @cli.command()
-@click.option("--repo", required=True, help="GitHub repository URL.")
+@click.option("--repo", required=True,
+              help="GitHub or HuggingFace repository URL.")
 @click.option("--output", default=None, help="Output file path for the generated recipe.")
 @click.option("--publish", is_flag=True, default=False,
               help="Open a PR to the public registry.")
 @click.option("--format", "fmt", default="yaml",
               type=click.Choice(["yaml", "markdown"]), show_default=True)
 def generate(repo, output, publish, fmt):
-    """Generate a kdream recipe from a GitHub repository using AI agents.
+    """Generate a kdream recipe from a GitHub or HuggingFace repository using AI agents.
 
     \b
     Requires ANTHROPIC_API_KEY environment variable.
+    Supports both GitHub repos and HuggingFace model URLs.
 
     \b
     Examples:
       kdream generate --repo https://github.com/Tongyi-MAI/Z-Image
+      kdream generate --repo https://huggingface.co/stabilityai/sdxl-turbo
       kdream generate --repo https://github.com/nikopueringer/CorridorKey --output ./my-recipe.yaml
     """
+    from kdream.agents.recipe_generator import is_huggingface_url, normalize_github_url
+
+    # Normalise GitHub URLs that include /tree/<branch>
+    if not is_huggingface_url(repo):
+        repo = normalize_github_url(repo)
+
     try:
         import kdream as k
         console.print(Panel(
@@ -223,16 +232,25 @@ def generate(repo, output, publish, fmt):
         recipe = k.generate_recipe(repo=repo, output=output, publish=publish)
         console.print(f"\n[bold green]✓ Recipe generated:[/bold green] {recipe.metadata.name}")
 
-        # If no --output was given, save to ./recipes/<category>/<name>.yaml
+        # If no --output was given, save to kdream/recipes/<category>/<name>.yaml
         if not output:
             category = recipe.metadata.tags[0] if recipe.metadata.tags else "uncategorized"
-            default_out = Path("recipes") / category / f"{recipe.metadata.name}.yaml"
+            _recipes_root = Path(__file__).parent / "recipes"
+            default_out = _recipes_root / category / f"{recipe.metadata.name}.yaml"
             default_out.parent.mkdir(parents=True, exist_ok=True)
             from kdream.core.recipe import recipe_to_yaml
             default_out.write_text(recipe_to_yaml(recipe), encoding="utf-8")
             console.print(f"  Saved to: [cyan]{default_out}[/cyan]")
+
+            if recipe._runner_script:
+                script_path = default_out.parent / "run.py"
+                script_path.write_text(recipe._runner_script, encoding="utf-8")
+                console.print(f"  Runner:   [cyan]{script_path}[/cyan]")
         else:
             console.print(f"  Saved to: [cyan]{output}[/cyan]")
+            if recipe._runner_script:
+                script_path = Path(output).parent / "run.py"
+                console.print(f"  Runner:   [cyan]{script_path}[/cyan]")
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
@@ -258,12 +276,30 @@ def packages(cache_dir):
 
         table = Table(title="Installed Packages", show_header=True, header_style="bold cyan")
         table.add_column("Recipe", style="cyan")
+        table.add_column("Models", style="green")
+        table.add_column("Size", style="yellow", justify="right")
         table.add_column("Path", style="dim")
         table.add_column("Ready")
 
         for pkg in pkgs:
+            # Scan models directory for downloaded weight files
+            model_files: list[str] = []
+            total_bytes = 0
+            model_exts = {".safetensors", ".bin", ".ckpt", ".pt", ".pth", ".gguf"}
+            if pkg.models_path.exists():
+                for f in pkg.models_path.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in model_exts:
+                        model_files.append(f.name)
+                        total_bytes += f.stat().st_size
+            models_str = "\n".join(model_files[:3]) + (
+                f"\n…+{len(model_files) - 3} more" if len(model_files) > 3 else ""
+            ) if model_files else "[dim]none[/dim]"
+            size_str = f"{total_bytes / 1e9:.1f} GB" if total_bytes else "—"
+
             table.add_row(
                 pkg.recipe_name,
+                models_str,
+                size_str,
                 str(pkg.path),
                 "[green]✓[/green]" if pkg.ready else "[yellow]⏳[/yellow]",
             )

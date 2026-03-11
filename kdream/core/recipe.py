@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+import pydantic
 from pydantic import BaseModel, field_validator
 
 from kdream.exceptions import RecipeError
@@ -91,6 +92,10 @@ class Recipe(BaseModel):
     inputs: dict[str, InputSpec] = {}
     outputs: list[OutputSpec] = []
     backends: BackendSpecs = BackendSpecs()
+
+    # Transient: generated runner script content (not serialised to YAML).
+    # Set by RecipeGeneratorAgent for HuggingFace-sourced recipes.
+    _runner_script: str | None = pydantic.PrivateAttr(default=None)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
-"""Multi-agent pipeline for generating kdream recipes from GitHub repositories."""
+"""Multi-agent pipeline for generating kdream recipes from GitHub or HuggingFace repositories."""
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,10 @@ def call_agent(agent_name: str, user_message: str, client: Any) -> str:
     )
     return response.content[0].text
 
+
+# ---------------------------------------------------------------------------
+# GitHub repo info
+# ---------------------------------------------------------------------------
 
 def get_repo_info(repo_url: str) -> dict[str, str]:
     """Clone the repo (shallow) and collect key files for agent analysis."""
@@ -112,6 +117,107 @@ def get_repo_info(repo_url: str) -> dict[str, str]:
         return info
 
 
+# ---------------------------------------------------------------------------
+# HuggingFace repo info
+# ---------------------------------------------------------------------------
+
+_HF_URL_RE = re.compile(
+    r"^https?://huggingface\.co/([^/]+/[^/?\s]+)",
+    re.IGNORECASE,
+)
+_GH_TREE_RE = re.compile(r"^(https?://github\.com/[^/]+/[^/]+)/tree/.*$", re.IGNORECASE)
+
+
+def normalize_github_url(url: str) -> str:
+    """Strip ``/tree/<branch>`` suffixes from GitHub URLs."""
+    m = _GH_TREE_RE.match(url.strip())
+    return m.group(1) if m else url.strip()
+
+
+def is_huggingface_url(url: str) -> bool:
+    """Return True if *url* points to a HuggingFace model repository."""
+    return bool(_HF_URL_RE.match(url.strip()))
+
+
+def hf_model_id_from_url(url: str) -> str:
+    """Extract ``org/model`` from a HuggingFace URL."""
+    m = _HF_URL_RE.match(url.strip())
+    if not m:
+        raise ValueError(f"Not a valid HuggingFace model URL: {url!r}")
+    return m.group(1)
+
+
+def get_hf_model_info(model_id: str) -> dict[str, str]:
+    """Fetch model card, metadata and file listing from the HuggingFace Hub."""
+    from huggingface_hub import HfApi, ModelCard  # type: ignore[import]
+
+    api = HfApi()
+    console.print(f"  [dim]Fetching HuggingFace model info: {model_id}…[/dim]")
+
+    try:
+        hf_info = api.model_info(model_id)
+    except Exception as exc:
+        raise RuntimeError(f"Could not fetch HF model info for {model_id!r}: {exc}") from exc
+
+    # Model card text
+    card_text = ""
+    try:
+        card = ModelCard.load(model_id)
+        card_text = str(card)[:10000]
+    except Exception:
+        pass
+
+    # File listing
+    files: list[str] = []
+    try:
+        files = list(api.list_repo_files(model_id))
+    except Exception:
+        pass
+
+    # Card data (YAML front-matter parsed by huggingface_hub)
+    card_data = getattr(hf_info, "card_data", None)
+    try:
+        license_val = str(
+            getattr(card_data, "get", lambda k, d: None)("license", None)
+            or getattr(card_data, "license", None)
+            or "unknown"
+        )
+    except Exception:
+        license_val = "unknown"
+
+    return {
+        "model_id": model_id,
+        "url": f"https://huggingface.co/{model_id}",
+        "pipeline_tag": getattr(hf_info, "pipeline_tag", "") or "",
+        "library_name": getattr(hf_info, "library_name", "") or "",
+        "tags": ", ".join(getattr(hf_info, "tags", []) or []),
+        "license": license_val or "unknown",
+        "downloads": str(getattr(hf_info, "downloads", 0) or 0),
+        "model_card": card_text,
+        "files": "\n".join(files[:150]),
+    }
+
+
+def _build_hf_base_msg(hf_info: dict[str, str]) -> str:
+    """Format HF model info into a base message for the agent pipeline."""
+    return (
+        f"SOURCE_TYPE: huggingface\n"
+        f"Model ID: {hf_info['model_id']}\n"
+        f"URL: {hf_info['url']}\n"
+        f"Pipeline Tag: {hf_info['pipeline_tag']}\n"
+        f"Library: {hf_info['library_name']}\n"
+        f"Tags: {hf_info['tags']}\n"
+        f"License: {hf_info['license']}\n"
+        f"Downloads: {hf_info['downloads']}\n\n"
+        f"## Model Card\n{hf_info['model_card'] or '(unavailable)'}\n\n"
+        f"## Files in Repository\n{hf_info['files'] or '(unavailable)'}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _extract_yaml(text: str) -> str:
     """Strip markdown code fences from a YAML block if present."""
     if "```yaml" in text:
@@ -121,9 +227,22 @@ def _extract_yaml(text: str) -> str:
     return text.strip()
 
 
+def _extract_python(text: str) -> str:
+    """Strip markdown code fences from a Python block if present."""
+    if "```python" in text:
+        return text.split("```python", 1)[1].split("```", 1)[0].strip()
+    if "```" in text:
+        return text.split("```", 1)[1].split("```", 1)[0].strip()
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# Agent pipeline
+# ---------------------------------------------------------------------------
+
 class RecipeGeneratorAgent:
     """Multi-agent pipeline: RepoInspector → EntrypointFinder → ModelLocator
-    → ParameterMapper → RecipeWriter."""
+    → ParameterMapper → RecipeWriter [→ HFScriptWriter for HF models]."""
 
     def __init__(self, api_key: str | None = None):
         import anthropic  # type: ignore[import]
@@ -137,51 +256,65 @@ class RecipeGeneratorAgent:
     ) -> Any:
         """Run the full agent pipeline and return a parsed Recipe object.
 
+        Supports both GitHub repository URLs and HuggingFace model URLs
+        (e.g. ``https://huggingface.co/stabilityai/sdxl-turbo``).
+
         Args:
-            repo:    GitHub repository URL.
+            repo:    GitHub repository URL or HuggingFace model URL.
             output:  Optional path to write the generated YAML recipe.
+                     For HF models, a companion ``run.py`` is written next to it.
             publish: If True, open a PR to the registry (not yet implemented).
         """
         from kdream.core.recipe import parse_yaml_recipe, validate_recipe
 
+        _is_hf = is_huggingface_url(repo)
+        source_label = "HuggingFace model" if _is_hf else "GitHub repository"
+        model_id: str = ""
+        hf_info: dict[str, str] = {}
+
         console.print(Panel(
             f"[bold]Recipe Generator[/bold]\n"
-            f"Repository: [cyan]{repo}[/cyan]\n"
+            f"{source_label}: [cyan]{repo}[/cyan]\n"
             "Pipeline: RepoInspector → EntrypointFinder → ModelLocator "
-            "→ ParameterMapper → RecipeWriter",
+            "→ ParameterMapper → RecipeWriter"
+            + (" → HFScriptWriter" if _is_hf else ""),
             title="kdream Agent",
             expand=False,
         ))
 
-        # ── Step 1: Collect repository data ──────────────────────────────
-        console.print("\n[bold]1/6[/bold] Collecting repository data…")
-        try:
-            repo_info = get_repo_info(repo)
-        except Exception as exc:
-            console.print(f"[yellow]Warning:[/yellow] Could not clone repo ({exc}). "
-                          "Using URL-only analysis.")
-            repo_info = {k: "" for k in
-                         ["url", "tree", "readme", "requirements", "setup_py", "pyproject",
-                          "candidate_scripts"]}
-            repo_info["url"] = repo
-
-        base_msg = (
-            f"Repository URL: {repo_info['url']}\n\n"
-            f"## File Tree\n{repo_info['tree'] or '(unavailable)'}\n\n"
-            f"## README\n{repo_info['readme'] or '(unavailable)'}\n\n"
-            f"## Requirements\n{repo_info['requirements'] or '(unavailable)'}\n\n"
-            f"## Setup files\n"
-            f"{repo_info['setup_py'] or repo_info['pyproject'] or '(unavailable)'}\n\n"
-            f"## Candidate Inference Scripts\n"
-            f"{repo_info['candidate_scripts'] or '(unavailable)'}"
-        )
+        # ── Step 1: Collect source data ───────────────────────────────────
+        console.print(f"\n[bold]1/{'7' if _is_hf else '6'}[/bold] Collecting source data…")
+        if _is_hf:
+            model_id = hf_model_id_from_url(repo)
+            hf_info = get_hf_model_info(model_id)
+            base_msg = _build_hf_base_msg(hf_info)
+        else:
+            try:
+                repo_info = get_repo_info(repo)
+            except Exception as exc:
+                console.print(f"[yellow]Warning:[/yellow] Could not clone repo ({exc}). "
+                              "Using URL-only analysis.")
+                repo_info = {k: "" for k in
+                             ["url", "tree", "readme", "requirements", "setup_py", "pyproject",
+                              "candidate_scripts"]}
+                repo_info["url"] = repo
+            base_msg = (
+                f"Repository URL: {repo_info['url']}\n\n"
+                f"## File Tree\n{repo_info['tree'] or '(unavailable)'}\n\n"
+                f"## README\n{repo_info['readme'] or '(unavailable)'}\n\n"
+                f"## Requirements\n{repo_info['requirements'] or '(unavailable)'}\n\n"
+                f"## Setup files\n"
+                f"{repo_info['setup_py'] or repo_info['pyproject'] or '(unavailable)'}\n\n"
+                f"## Candidate Inference Scripts\n"
+                f"{repo_info['candidate_scripts'] or '(unavailable)'}"
+            )
 
         # ── Step 2: RepoInspector ─────────────────────────────────────────
-        console.print("\n[bold]2/6[/bold] Inspecting repository structure…")
+        console.print(f"\n[bold]2/{'7' if _is_hf else '6'}[/bold] Inspecting repository structure…")
         repo_analysis = call_agent("repo-inspector", base_msg, self.client)
 
         # ── Step 3: EntrypointFinder ──────────────────────────────────────
-        console.print("\n[bold]3/6[/bold] Finding inference entrypoints…")
+        console.print(f"\n[bold]3/{'7' if _is_hf else '6'}[/bold] Finding inference entrypoints…")
         entrypoint_info = call_agent(
             "entrypoint-finder",
             base_msg + f"\n\n## Repo Analysis\n{repo_analysis}",
@@ -189,7 +322,7 @@ class RecipeGeneratorAgent:
         )
 
         # ── Step 4: ModelLocator ──────────────────────────────────────────
-        console.print("\n[bold]4/6[/bold] Locating model weights…")
+        console.print(f"\n[bold]4/{'7' if _is_hf else '6'}[/bold] Locating model weights…")
         model_info = call_agent(
             "model-locator",
             base_msg + f"\n\n## Repo Analysis\n{repo_analysis}",
@@ -197,7 +330,7 @@ class RecipeGeneratorAgent:
         )
 
         # ── Step 5: ParameterMapper ───────────────────────────────────────
-        console.print("\n[bold]5/6[/bold] Mapping parameters to kdream schema…")
+        console.print(f"\n[bold]5/{'7' if _is_hf else '6'}[/bold] Mapping parameters to kdream schema…")
         param_info = call_agent(
             "parameter-mapper",
             f"## Entrypoint Analysis\n{entrypoint_info}\n\n"
@@ -207,7 +340,7 @@ class RecipeGeneratorAgent:
         )
 
         # ── Step 6: RecipeWriter ──────────────────────────────────────────
-        console.print("\n[bold]6/6[/bold] Writing recipe…")
+        console.print(f"\n[bold]6/{'7' if _is_hf else '6'}[/bold] Writing recipe…")
         recipe_yaml_raw = call_agent(
             "recipe-writer",
             f"Repository URL: {repo}\n\n"
@@ -235,12 +368,32 @@ class RecipeGeneratorAgent:
             for err in errors:
                 console.print(f"  • {err}")
 
+        # ── Step 7 (HF only): Generate companion runner script ────────────
+        if _is_hf:
+            console.print("\n[bold]7/7[/bold] Generating companion runner script…")
+            script_raw = call_agent(
+                "hf-script-writer",
+                f"Model ID: {model_id}\n"
+                f"Pipeline Tag: {hf_info['pipeline_tag']}\n"
+                f"Library: {hf_info['library_name']}\n\n"
+                f"## Model Card\n{hf_info['model_card'][:4000]}\n\n"
+                f"## Parameters\n{param_info}\n\n"
+                f"## Entrypoint Analysis\n{entrypoint_info}",
+                self.client,
+            )
+            recipe._runner_script = _extract_python(script_raw)
+
         # ── Save if requested ─────────────────────────────────────────────
         if output:
             out_path = Path(output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(yaml_content, encoding="utf-8")
             console.print(f"\n[green]✓ Recipe saved to {out_path}[/green]")
+
+            if recipe._runner_script:
+                script_path = out_path.parent / "run.py"
+                script_path.write_text(recipe._runner_script, encoding="utf-8")
+                console.print(f"[green]✓ Runner script saved to {script_path}[/green]")
 
         if publish:
             console.print(

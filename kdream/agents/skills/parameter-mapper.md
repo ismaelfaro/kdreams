@@ -69,4 +69,4 @@ Return a JSON object mapping parameter names to their kdream input specs (and no
 }
 ```
 
-If no clear inputs exist (e.g. the project is a game), return a minimal object with just a "config" string input.
+If no clear inputs exist (e.g. the project is a game or tool), return a minimal object with an optional "config" string input (not required, no default).
