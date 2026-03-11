@@ -15,7 +15,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.9.0", prog_name="kdream")
+@click.version_option(version="0.9.1", prog_name="kdream")
 def cli():
     """kdream — Run any AI model with a single command.
 
@@ -379,6 +379,181 @@ def serve(port, host, transport, use_ngrok, ngrok_token):
     finally:
         if tunnel is not None:
             tunnel.stop()
+
+
+@cli.group()
+def remote():
+    """Run inference on a remote kdream MCP server."""
+
+
+def _remote_client():
+    """Import the MCP client, printing a helpful error if deps are missing."""
+    try:
+        from kdream.service.mcp_client import call_tool
+        return call_tool
+    except ImportError:
+        console.print(
+            "[bold red]Error:[/bold red] MCP dependencies not installed.\n"
+            "Run: [cyan]uv pip install 'kdream[service]'[/cyan]"
+        )
+        sys.exit(1)
+
+
+@remote.command(name="run")
+@click.argument("recipe")
+@click.option("--url", required=True, envvar="KDREAM_REMOTE_URL",
+              help="Remote MCP server URL, e.g. http://host:8765/mcp (or set KDREAM_REMOTE_URL).")
+@click.option("--prompt", default=None, help="Text prompt.")
+@click.option("--negative-prompt", default=None, help="Negative prompt.")
+@click.option("--steps", default=None, type=int, help="Inference steps.")
+@click.option("--guidance-scale", default=None, type=float, help="Guidance scale.")
+@click.option("--seed", default=None, type=int, help="Random seed.")
+@click.option("--width", default=None, type=int, help="Output width.")
+@click.option("--height", default=None, type=int, help="Output height.")
+@click.option("--output-dir", default=None, help="Output directory on the remote machine.")
+@click.option("--backend", default="local", show_default=True,
+              help="Compute backend on the remote server.")
+@click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
+def remote_run(recipe, url, prompt, negative_prompt, steps, guidance_scale,
+               seed, width, height, output_dir, backend, extra_args):
+    """Run inference on a remote kdream MCP server.
+
+    \b
+    RECIPE is the recipe name or path as understood by the remote server.
+
+    \b
+    Examples:
+      kdream remote run stable-diffusion-xl-base --url http://host:8765/mcp --prompt "red panda"
+      kdream remote run llama-3-8b-instruct --url $KDREAM_REMOTE_URL --prompt "hello"
+    """
+    call_tool = _remote_client()
+
+    args: dict = {"recipe": recipe, "backend": backend}
+    for key, val in [
+        ("prompt", prompt), ("negative_prompt", negative_prompt),
+        ("steps", steps), ("guidance_scale", guidance_scale),
+        ("seed", seed), ("width", width), ("height", height),
+        ("output_dir", output_dir),
+    ]:
+        if val is not None:
+            args[key] = val
+
+    # Parse extra --key value pairs
+    i, extra = 0, list(extra_args)
+    while i < len(extra):
+        if extra[i].startswith("--"):
+            key = extra[i][2:].replace("-", "_")
+            if i + 1 < len(extra) and not extra[i + 1].startswith("--"):
+                args[key] = extra[i + 1]
+                i += 2
+            else:
+                args[key] = True
+                i += 1
+        else:
+            i += 1
+
+    try:
+        console.print(Panel(
+            f"[bold blue]Remote inference[/bold blue]\n"
+            f"Server: [cyan]{url}[/cyan]\n"
+            f"Recipe: {recipe}",
+            expand=False,
+        ))
+        result = call_tool(url, "run_recipe", args)
+        if result.get("error"):
+            console.print(f"[bold red]Remote error:[/bold red] {result['error']}")
+            sys.exit(1)
+        console.print("\n[bold green]✓ Remote inference complete[/bold green]")
+        outputs = result.get("outputs") or {}
+        if outputs:
+            table = Table(title="Outputs", show_header=True)
+            table.add_column("Name", style="cyan")
+            table.add_column("Value", style="white")
+            for name, value in outputs.items():
+                table.add_row(name, str(value))
+            console.print(table)
+        meta = result.get("metadata") or {}
+        if meta:
+            console.print(
+                f"[dim]Backend: {meta.get('backend', backend)} | "
+                f"Duration: {meta.get('duration_s', 0):.1f}s[/dim]"
+            )
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@remote.command(name="list")
+@click.option("--url", required=True, envvar="KDREAM_REMOTE_URL",
+              help="Remote MCP server URL (or set KDREAM_REMOTE_URL).")
+@click.option("--tag", "tags", multiple=True, help="Filter by tag.")
+@click.option("--backend", default=None, help="Filter by backend.")
+def remote_list(url, tags, backend):
+    """List recipes available on the remote kdream server.
+
+    \b
+    Example:
+      kdream remote list --url http://host:8765/mcp --tag image-generation
+    """
+    call_tool = _remote_client()
+    args: dict = {}
+    if tags:
+        args["tags"] = list(tags)
+    if backend:
+        args["backend"] = backend
+
+    try:
+        recipes = call_tool(url, "list_recipes", args)
+        if not isinstance(recipes, list) or not recipes:
+            console.print("[yellow]No recipes found.[/yellow]")
+            return
+        table = Table(title=f"Recipes on {url}", show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="cyan", min_width=28)
+        table.add_column("Tags", style="green", min_width=16)
+        table.add_column("Description", style="dim", min_width=20)
+        for r in recipes:
+            table.add_row(
+                r.get("name", ""),
+                ", ".join((r.get("tags") or [])[:3]),
+                (r.get("description", "")[:55] + "…")
+                if len(r.get("description", "")) > 55 else r.get("description", ""),
+            )
+        console.print(table)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@remote.command(name="packages")
+@click.option("--url", required=True, envvar="KDREAM_REMOTE_URL",
+              help="Remote MCP server URL (or set KDREAM_REMOTE_URL).")
+def remote_packages(url):
+    """List installed packages on the remote kdream server.
+
+    \b
+    Example:
+      kdream remote packages --url http://host:8765/mcp
+    """
+    call_tool = _remote_client()
+    try:
+        pkgs = call_tool(url, "list_installed", {})
+        if not isinstance(pkgs, list) or not pkgs:
+            console.print("[yellow]No packages installed on remote server.[/yellow]")
+            return
+        table = Table(title=f"Installed on {url}", show_header=True, header_style="bold cyan")
+        table.add_column("Recipe", style="cyan")
+        table.add_column("Path", style="dim")
+        table.add_column("Ready")
+        for pkg in pkgs:
+            table.add_row(
+                pkg.get("recipe_name", ""),
+                pkg.get("path", ""),
+                "[green]✓[/green]" if pkg.get("ready") else "[yellow]⏳[/yellow]",
+            )
+        console.print(table)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
 
 
 @cli.group()
