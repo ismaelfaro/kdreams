@@ -20,6 +20,7 @@ class RecipeSource(BaseModel):
     repo: str
     ref: str = "main"
     install_extras: list[str] = []
+    skip_package_install: bool = False
 
 
 class ModelDescriptor(BaseModel):
@@ -27,6 +28,8 @@ class ModelDescriptor(BaseModel):
     source: Literal["huggingface", "url", "civitai", "local"]
     id: str
     destination: str
+    file_path: str | None = None  # specific file within an HF repo (uses hf_hub_download)
+    component_role: str | None = None  # e.g. vae, unet, text_encoder, dit, full_model
     checksum: str | None = None
     size_gb: float | None = None
     license: str | None = None

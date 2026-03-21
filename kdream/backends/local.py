@@ -54,7 +54,7 @@ class HardwareDetector:
         # Try MPS (Apple Silicon)
         try:
             import torch  # type: ignore[import]
-            if platform.processor() == "arm" and sys.platform == "darwin":
+            if sys.platform == "darwin" and platform.machine() == "arm64":
                 if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                     info["device"] = "mps"
                     return info
@@ -75,6 +75,10 @@ class HardwareDetector:
                 info["vram_gb"] = round(vram_mib / 1024, 1)
         except Exception:
             pass
+
+        # Platform heuristic: Apple Silicon Mac without torch installed
+        if sys.platform == "darwin" and platform.machine() == "arm64" and info["device"] == "cpu":
+            info["device"] = "mps"
 
         return info
 
@@ -157,6 +161,7 @@ class EnvironmentManager:
         venv_path: Path,
         extras: list[str] = [],
         verbose: bool = False,
+        skip_package_install: bool = False,
     ) -> None:
         """Install ALL dependencies found in the repo into the venv.
 
@@ -206,12 +211,24 @@ class EnvironmentManager:
             )
 
         # 2. Install the package itself if it is pip-installable
-        if has_installable:
+        if has_installable and not skip_package_install:
             console.print("  Installing package ([cyan]setup.py / pyproject.toml[/cyan]) ...")
-            _run(
-                ["uv", "pip", "install", "--python", str(python_bin), "-e", str(repo_path)],
-                "package install",
-            )
+            try:
+                _run(
+                    ["uv", "pip", "install", "--python", str(python_bin), "-e", str(repo_path)],
+                    "package install",
+                )
+            except BackendError:
+                if req_files:
+                    console.print(
+                        "  [yellow]Warning:[/yellow] Package install failed "
+                        "(pyproject.toml/setup.py not pip-installable). "
+                        "Continuing — requirements were already installed."
+                    )
+                else:
+                    raise
+        elif has_installable and skip_package_install:
+            console.print("  [dim]Skipping package install (skip_package_install=true)[/dim]")
 
         # 3. Extra requirements files declared in the recipe
         for extra in extras:
@@ -264,19 +281,54 @@ class EnvironmentManager:
 class ModelManager:
     """Downloads and verifies model weights."""
 
-    def fetch_hf(self, repo_id: str, dest: Path, token: str | None = None) -> None:
-        """Download HuggingFace model via snapshot_download."""
-        if dest.exists() and any(dest.iterdir()):
-            console.print(f"  [dim]Model already at {dest}[/dim]")
-            return
+    def fetch_hf(
+        self,
+        repo_id: str,
+        dest: Path,
+        token: str | None = None,
+        file_path: str | None = None,
+    ) -> None:
+        """Download a HuggingFace model.
 
-        dest.mkdir(parents=True, exist_ok=True)
-        console.print(f"  Downloading HuggingFace model [cyan]{repo_id}[/cyan] ...")
-        try:
-            from huggingface_hub import snapshot_download  # type: ignore[import]
-            snapshot_download(repo_id, local_dir=str(dest), token=token)
-        except Exception as e:
-            raise ModelDownloadError(f"Failed to download {repo_id}: {e}") from e
+        When *file_path* is given, download only that single file from the
+        repo using ``hf_hub_download`` (fast, avoids pulling the entire repo).
+        Otherwise fall back to ``snapshot_download`` for the full repository.
+        """
+        if file_path:
+            # Single-file download mode
+            if dest.exists():
+                console.print(f"  [dim]Model already at {dest}[/dim]")
+                return
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            console.print(
+                f"  Downloading [cyan]{repo_id}[/cyan] "
+                f"file [cyan]{file_path}[/cyan] ..."
+            )
+            try:
+                from huggingface_hub import hf_hub_download  # type: ignore[import]
+                cached = hf_hub_download(repo_id, filename=file_path, token=token)
+                # Symlink to HF cache to avoid duplicating large files on disk
+                try:
+                    dest.symlink_to(cached)
+                except OSError:
+                    import shutil
+                    shutil.copy2(cached, dest)
+            except Exception as e:
+                raise ModelDownloadError(
+                    f"Failed to download {repo_id}/{file_path}: {e}"
+                ) from e
+        else:
+            # Full-repo download mode
+            if dest.exists() and any(dest.iterdir()):
+                console.print(f"  [dim]Model already at {dest}[/dim]")
+                return
+            dest.mkdir(parents=True, exist_ok=True)
+            console.print(f"  Downloading HuggingFace model [cyan]{repo_id}[/cyan] ...")
+            try:
+                from huggingface_hub import snapshot_download  # type: ignore[import]
+                snapshot_download(repo_id, local_dir=str(dest), token=token)
+            except Exception as e:
+                raise ModelDownloadError(f"Failed to download {repo_id}: {e}") from e
 
     def fetch_url(self, url: str, dest: Path) -> None:
         """Download a file from *url* to *dest* with resume support."""
@@ -351,7 +403,7 @@ class ModelManager:
         dest = models_dir / model_desc.destination
         src = model_desc.source
         if src == "huggingface":
-            self.fetch_hf(model_desc.id, dest)
+            self.fetch_hf(model_desc.id, dest, file_path=model_desc.file_path)
         elif src == "url":
             file_name = model_desc.id.split("/")[-1]
             self.fetch_url(model_desc.id, dest / file_name)
@@ -567,7 +619,9 @@ class LocalBackend(AbstractBackend):
         # 3. Install dependencies
         console.print(f"\n[bold][3/4][/bold] Installing dependencies")
         self.env_manager.install_deps(
-            repo_path, venv_path, recipe.source.install_extras, verbose=self.verbose
+            repo_path, venv_path, recipe.source.install_extras,
+            verbose=self.verbose,
+            skip_package_install=recipe.source.skip_package_install,
         )
 
         # 4. Download models
@@ -690,14 +744,24 @@ class LocalBackend(AbstractBackend):
     # ------------------------------------------------------------------
 
     def _find_bundled_wrapper(self, recipe: Recipe) -> Path | None:
-        """Return the companion *_runner.py path bundled alongside the recipe YAML,
-        or None if no companion script exists."""
+        """Return the companion runner script bundled alongside the recipe YAML,
+        or None if no companion script exists.
+
+        Checks in order:
+        1. ``{recipe_name}_runner.py`` next to the YAML (recipe-specific runner)
+        2. The entrypoint script name (e.g. ``run.py``) next to the YAML (shared runner)
+        """
         bundled_dir = Path(__file__).parent.parent / "recipes"
         for yaml_path in bundled_dir.rglob("*.yaml"):
             if yaml_path.stem == recipe.metadata.name:
+                # 1. Recipe-specific companion
                 companion = yaml_path.parent / f"{recipe.metadata.name}_runner.py"
                 if companion.exists():
                     return companion
+                # 2. Shared runner matching the entrypoint script name
+                shared = yaml_path.parent / recipe.entrypoint.script
+                if shared.exists():
+                    return shared
         return None
 
     def _ensure_cli_wrapper(self, recipe: Recipe, package) -> Path | None:

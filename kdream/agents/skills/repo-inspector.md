@@ -41,6 +41,30 @@ NOTES: <any special setup requirements, license notes, or caveats>
 Be concise and accurate. If information is not available, write "unknown".
 If this is not an AI/ML inference project (e.g. it's a game or a utility), say so clearly in NOTES.
 
+Also include in your output:
+
+```
+COMPONENT_ARCHITECTURE: <description of all sub-components, e.g. "DiT backbone + dual VAE (video/audio) + Gemma-3 text encoder">
+KNOWN_HF_MODELS: <comma-separated list of HuggingFace model IDs found in README, code, or model card>
+```
+
+- `COMPONENT_ARCHITECTURE` should describe the full architecture including all sub-models (backbone, VAE, text encoder, audio encoder, etc.)
+- `KNOWN_HF_MODELS` should list every HuggingFace `org/model` ID referenced in the README, code samples, or model card (e.g. `google/gemma-3-4b-pt, Lightricks/LTX-Video-0.9.5`)
+
+**IMPORTANT: Package installability check.** Look at the repo structure and determine if it is a proper pip-installable Python package. If the repo has multiple top-level Python directories (e.g. `app/`, `comfy/`, `models/`, `custom_nodes/` side by side), it likely uses a flat layout that `setuptools` cannot auto-discover and will FAIL `pip install .`. Application frameworks like ComfyUI, InvokeAI, and A1111 are NOT pip-installable. If you detect this, add `SKIP_PACKAGE_INSTALL: yes` to your output and note it in NOTES. Also add this line if `pyproject.toml` or `setup.py` exists but the project is clearly an application/framework, not a library.
+
+## Deep Architecture Analysis
+
+When analysing the repository or model card, go beyond surface-level metadata and identify:
+
+1. **All sub-components** — Many modern AI models consist of multiple sub-models. For example:
+   - A video generation model may have a DiT backbone, a VAE (or separate video/audio VAEs), a text encoder (e.g. Gemma-3, T5, CLIP), and a scheduler.
+   - A text-to-image pipeline may have a UNet/DiT, a VAE, one or more text encoders (CLIP, T5), and optional refiners or upscalers.
+2. **Their likely HuggingFace sources** — Each component may come from a different HF repository. Look for `from_pretrained("org/model")` patterns, README references, and config files.
+3. **Special loading requirements** — Some components need specific dtype (bf16, fp16), specific device placement, or custom loading code.
+
+This deep analysis is critical because downstream agents need to know ALL components to generate working recipes.
+
 ## HuggingFace Model Cards
 
 When the input is a HuggingFace model card (indicated by `SOURCE_TYPE: huggingface`), use:
@@ -49,3 +73,4 @@ When the input is a HuggingFace model card (indicated by `SOURCE_TYPE: huggingfa
 - `tags` → informs MODEL_TYPE and TAGS
 - Usage code examples in the card → informs HARDWARE requirements
 - File listing → informs model size and VRAM estimate (count `.safetensors`/`.bin` files and sizes)
+- **GitHub Repository** — look for `GitHub Repository:` in the input or any `github.com` links in the model card. If found, include it in the NOTES as the associated source code repository.
