@@ -10,8 +10,6 @@
 
 > *Clone a GitHub repo. Run it anywhere. Share the recipe.*
 
-This project is a evolution of [LLMOS](https://github.com/EvolvingAgentsLabs/llmos) where we explore how Skills can be used as a programs. 
-
 ---
 
 ## Installation
