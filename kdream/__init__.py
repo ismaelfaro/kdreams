@@ -16,6 +16,7 @@ from kdream.core.recipe import Recipe, load_recipe, validate_recipe
 from kdream.core.runner import RunResult, PackageInfo, run, install, list_installed
 from kdream.backends.local import detect_accelerator
 from kdream.exceptions import KdreamError, RecipeError, RegistryError, BackendError
+from kdream.hub import HFModel, search_hf_models
 
 __version__ = "0.10.4"
 
@@ -64,12 +65,14 @@ __all__ = [
     "list_recipes",
     "list_installed",
     "generate_recipe",
+    "search_hf_models",
     "detect_accelerator",
     "load_recipe",
     "validate_recipe",
     "Recipe",
     "RunResult",
     "PackageInfo",
+    "HFModel",
     "KdreamError",
     "RecipeError",
     "RegistryError",
