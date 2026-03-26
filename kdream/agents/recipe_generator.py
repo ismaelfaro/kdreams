@@ -893,6 +893,8 @@ class RecipeGeneratorAgent:
                 console.print(f"  • {err}")
 
         # ── Step 6 (HF / hybrid): Generate companion runner script ────────
+        # (Runner script is generated before component verification so the
+        # verifier can see it when checking the entrypoint.)
         if _needs_script:
             console.print(f"\n[bold]6/{total_steps}[/bold] Generating companion runner script…")
             variant_ctx = ""
@@ -915,6 +917,34 @@ class RecipeGeneratorAgent:
                 self.client,
             )
             recipe._runner_script = _extract_python(script_raw)
+
+        # ── Component verification ────────────────────────────────────────
+        console.print(f"\n[bold]{total_steps + 1}/{total_steps + 1}[/bold] Verifying components…")
+        from kdream.core.verifier import RecipeVerifier
+        verifier = RecipeVerifier()
+        verification = verifier.verify(recipe, runner_script=recipe._runner_script)
+
+        if verification.warnings:
+            console.print(
+                f"[yellow]⚠ {len(verification.warnings)} warning(s):[/yellow]"
+            )
+            for w in verification.warnings:
+                console.print(f"  [yellow]{w}[/yellow]")
+
+        if not verification.ok:
+            console.print(
+                f"\n[bold red]✗ Component verification failed "
+                f"({len(verification.errors)} error(s)):[/bold red]"
+            )
+            for err in verification.errors:
+                console.print(f"  [red]{err}[/red]")
+            console.print(
+                "\n[dim]The recipe has been generated but cannot be used until "
+                "the above issues are resolved.[/dim]"
+            )
+            verification.raise_if_errors()
+
+        console.print("[bold green]✓ All components verified.[/bold green]")
 
         # ── Save if requested ─────────────────────────────────────────────
         if output:

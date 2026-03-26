@@ -311,12 +311,19 @@ def packages(cache_dir):
 
 @cli.command()
 @click.argument("recipe_file")
-def validate(recipe_file):
+@click.option("--skip-verify", is_flag=True, default=False,
+              help="Skip network component verification (models, entrypoint, repo).")
+def validate(recipe_file, skip_verify):
     """Validate a local recipe file.
 
+    By default, also verifies that all referenced components exist
+    (model IDs on HuggingFace, URLs, entrypoint scripts in the repo).
+    Use --skip-verify to perform structural checks only.
+
     \b
-    Example:
+    Examples:
       kdream validate ./my-recipe.yaml
+      kdream validate ./my-recipe.yaml --skip-verify
     """
     try:
         from kdream.core.recipe import load_recipe, validate_recipe
@@ -325,19 +332,45 @@ def validate(recipe_file):
 
         if errors:
             console.print(
-                f"[bold red]✗ Validation failed ({len(errors)} error(s)):[/bold red]"
+                f"[bold red]✗ Structural validation failed ({len(errors)} error(s)):[/bold red]"
             )
             for err in errors:
                 console.print(f"  • {err}")
             sys.exit(1)
-        else:
+
+        console.print(
+            f"[bold green]✓ Structure valid:[/bold green] "
+            f"{recipe.metadata.name} v{recipe.metadata.version}"
+        )
+        console.print(f"  Inputs:  {len(recipe.inputs)}")
+        console.print(f"  Models:  {len(recipe.models)}")
+        console.print(f"  Outputs: {len(recipe.outputs)}")
+
+        if skip_verify:
+            console.print("[dim]  (component verification skipped)[/dim]")
+            return
+
+        console.print("\n[dim]Verifying components…[/dim]")
+        from kdream.core.verifier import RecipeVerifier
+        verification = RecipeVerifier().verify(recipe)
+
+        if verification.warnings:
+            for w in verification.warnings:
+                console.print(f"  [yellow]{w}[/yellow]")
+
+        if not verification.ok:
             console.print(
-                f"[bold green]✓ Valid:[/bold green] "
-                f"{recipe.metadata.name} v{recipe.metadata.version}"
+                f"\n[bold red]✗ Component verification failed "
+                f"({len(verification.errors)} error(s)):[/bold red]"
             )
-            console.print(f"  Inputs:  {len(recipe.inputs)}")
-            console.print(f"  Models:  {len(recipe.models)}")
-            console.print(f"  Outputs: {len(recipe.outputs)}")
+            for err in verification.errors:
+                console.print(f"  [red]{err}[/red]")
+            sys.exit(1)
+
+        console.print("[bold green]✓ All components verified.[/bold green]")
+
+    except SystemExit:
+        raise
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
