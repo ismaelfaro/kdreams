@@ -75,6 +75,21 @@ kdream = "kdream.cli:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=kdream --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["kdream"]
+omit = [
+    "kdream/backends/colab.py",
+    "kdream/backends/runpod.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
 
 [tool.ruff]
 line-length = 100
