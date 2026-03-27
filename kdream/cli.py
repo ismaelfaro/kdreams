@@ -203,7 +203,16 @@ def list_recipes(tags, backend, search):
               help="Open a PR to the public registry.")
 @click.option("--format", "fmt", default="yaml",
               type=click.Choice(["yaml", "markdown"]), show_default=True)
-def generate(repo, output, publish, fmt):
+@click.option("--arch", "target_arch", default=None,
+              type=click.Choice(["auto", "cuda", "mps", "cpu"], case_sensitive=False),
+              show_default=True,
+              help=(
+                  "Target compute architecture for the generated recipe. "
+                  "auto (default) detects the current machine. "
+                  "Use cuda/mps/cpu to generate for a different architecture "
+                  "(recipe will be marked as untested)."
+              ))
+def generate(repo, output, publish, fmt, target_arch):
     """Generate a kdream recipe from a GitHub or HuggingFace repository using AI agents.
 
     \b
@@ -215,12 +224,17 @@ def generate(repo, output, publish, fmt):
       kdream generate --repo https://github.com/Tongyi-MAI/Z-Image
       kdream generate --repo https://huggingface.co/stabilityai/sdxl-turbo
       kdream generate --repo https://github.com/nikopueringer/CorridorKey --output ./my-recipe.yaml
+      kdream generate --repo https://github.com/some/model --arch mps
+      kdream generate --repo https://github.com/some/model --arch cpu
     """
     from kdream.agents.recipe_generator import is_huggingface_url, normalize_github_url
 
     # Normalise GitHub URLs that include /tree/<branch>
     if not is_huggingface_url(repo):
         repo = normalize_github_url(repo)
+
+    # "auto" means let the agent detect the current machine
+    effective_arch = None if (target_arch is None or target_arch == "auto") else target_arch
 
     try:
         import kdream as k
@@ -229,7 +243,9 @@ def generate(repo, output, publish, fmt):
             title="Recipe Generator",
             expand=False,
         ))
-        recipe = k.generate_recipe(repo=repo, output=output, publish=publish)
+        recipe = k.generate_recipe(
+            repo=repo, output=output, publish=publish, target_arch=effective_arch
+        )
         console.print(f"\n[bold green]✓ Recipe generated:[/bold green] {recipe.metadata.name}")
 
         # If no --output was given, save to kdream/recipes/<category>/<name>.yaml

@@ -88,6 +88,17 @@ class TestExtractYAML:
         assert result == "apiVersion: kdream/v1"
 
 
+def _passing_verification():
+    """Return a mock VerificationResult that reports no issues."""
+    from kdream.core.verifier import VerificationResult
+    result = MagicMock(spec=VerificationResult)
+    result.ok = True
+    result.warnings = []
+    result.errors = []
+    result.raise_if_errors = MagicMock()
+    return result
+
+
 class TestRecipeGeneratorAgent:
     def _make_agent(self):
         with patch("anthropic.Anthropic"):
@@ -100,7 +111,8 @@ class TestRecipeGeneratorAgent:
 
     def test_generate_z_image_mocked(self, tmp_path):
         """Full pipeline with mocked LLM calls — Z-Image repo."""
-        with patch("anthropic.Anthropic") as mock_cls:
+        with patch("anthropic.Anthropic") as mock_cls, \
+             patch("kdream.core.verifier.RecipeVerifier.verify", return_value=_passing_verification()):
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_msg = MagicMock()
@@ -139,7 +151,8 @@ class TestRecipeGeneratorAgent:
             "repo: https://github.com/nikopueringer/CorridorKey",
         )
 
-        with patch("anthropic.Anthropic") as mock_cls:
+        with patch("anthropic.Anthropic") as mock_cls, \
+             patch("kdream.core.verifier.RecipeVerifier.verify", return_value=_passing_verification()):
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_msg = MagicMock()
@@ -171,7 +184,8 @@ class TestRecipeGeneratorAgent:
 
     def test_generate_uses_repo_info(self, tmp_path):
         """Verify get_repo_info is called with the repo URL."""
-        with patch("anthropic.Anthropic") as mock_cls:
+        with patch("anthropic.Anthropic") as mock_cls, \
+             patch("kdream.core.verifier.RecipeVerifier.verify", return_value=_passing_verification()):
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_msg = MagicMock()
@@ -192,7 +206,8 @@ class TestRecipeGeneratorAgent:
 
     def test_generate_repo_clone_failure_continues(self, tmp_path):
         """If cloning fails, pipeline should continue with URL-only analysis."""
-        with patch("anthropic.Anthropic") as mock_cls:
+        with patch("anthropic.Anthropic") as mock_cls, \
+             patch("kdream.core.verifier.RecipeVerifier.verify", return_value=_passing_verification()):
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
             mock_msg = MagicMock()
@@ -207,3 +222,49 @@ class TestRecipeGeneratorAgent:
                 # Should not raise — should fall back to URL-only
                 recipe = agent.generate(repo="https://github.com/Tongyi-MAI/Z-Image")
                 assert recipe is not None
+
+    def test_generate_target_arch_cuda(self, tmp_path):
+        """target_arch='cuda' is recorded in tested_on and passed to agents."""
+        cuda_recipe = MINIMAL_RECIPE_YAML + "\nbackends:\n  local:\n    requires_gpu: true\n    min_vram_gb: 8\n    tested_on: []\n"
+        with patch("anthropic.Anthropic") as mock_cls, \
+             patch("kdream.core.verifier.RecipeVerifier.verify", return_value=_passing_verification()), \
+             patch("kdream.agents.recipe_generator._detect_accelerator", return_value="mps"):
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_msg = MagicMock()
+            mock_msg.content = [MagicMock(text=cuda_recipe)]
+            mock_client.messages.create.return_value = mock_msg
+
+            from kdream.agents.recipe_generator import RecipeGeneratorAgent
+            agent = RecipeGeneratorAgent(api_key="test-key")
+
+            fake_repo = {"url": "https://github.com/Tongyi-MAI/Z-Image",
+                         "tree": "", "readme": "", "requirements": "",
+                         "setup_py": "", "pyproject": "", "candidate_scripts": ""}
+
+            with patch("kdream.agents.recipe_generator.get_repo_info", return_value=fake_repo):
+                recipe = agent.generate(
+                    repo="https://github.com/Tongyi-MAI/Z-Image",
+                    target_arch="cuda",
+                )
+
+            # tested_on should include the target arch
+            assert recipe.backends.local is not None
+            assert "cuda" in recipe.backends.local.tested_on
+
+    def test_generate_invalid_arch_raises(self, tmp_path):
+        """Invalid target_arch raises ValueError before any API calls."""
+        with patch("anthropic.Anthropic"):
+            from kdream.agents.recipe_generator import RecipeGeneratorAgent
+            agent = RecipeGeneratorAgent(api_key="test-key")
+            with pytest.raises(ValueError, match="Unknown target architecture"):
+                agent.generate(repo="https://github.com/Tongyi-MAI/Z-Image", target_arch="tpu")
+
+    def test_generate_help_arch_option(self):
+        """CLI generate command exposes --arch option."""
+        from click.testing import CliRunner
+        from kdream.cli import cli
+        runner = CliRunner()
+        result = runner.invoke(cli, ["generate", "--help"])
+        assert result.exit_code == 0
+        assert "--arch" in result.output
