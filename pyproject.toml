@@ -63,6 +63,10 @@ Documentation = "https://github.com/ismaelfaro/kdreams/tree/main/docs"
 Changelog = "https://github.com/ismaelfaro/kdreams/releases"
 
 [project.optional-dependencies]
+colab = [
+    "google-auth>=2.0",
+    "google-api-python-client>=2.0",
+]
 runpod = ["runpod"]
 kubernetes = ["kubernetes"]
 service = [
@@ -80,7 +84,6 @@ addopts = "--cov=kdream --cov-report=term-missing --cov-report=html"
 [tool.coverage.run]
 source = ["kdream"]
 omit = [
-    "kdream/backends/colab.py",
     "kdream/backends/runpod.py",
 ]
 

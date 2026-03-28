@@ -557,6 +557,69 @@ def info(recipe):
 
 
 @cli.group()
+def colab():
+    """Google Colab integration — generate and manage Colab notebooks."""
+
+
+@colab.command(name="generate")
+@click.argument("recipe")
+@click.option("--output", "-o", default=None,
+              help="Output path for the generated .ipynb file (default: ./<recipe>.ipynb).")
+@click.option("--gdrive-credentials", default=None, envvar="KDREAM_GDRIVE_CREDENTIALS",
+              help="Path to a Google service-account JSON key for automatic Drive upload.")
+@click.option("--prompt", default=None, help="Pre-fill the 'prompt' input.")
+@click.option("--steps", default=None, type=int, help="Pre-fill the 'steps' input.")
+@click.option("--seed", default=None, type=int, help="Pre-fill the 'seed' input.")
+def colab_generate(recipe, output, gdrive_credentials, prompt, steps, seed):
+    """Generate a self-contained Colab notebook for a recipe.
+
+    \b
+    The notebook clones the source repo, installs dependencies, downloads
+    models and runs inference — all inside Google Colab.
+
+    \b
+    Examples:
+      kdream colab generate stable-diffusion-xl-base
+      kdream colab generate flux-1-dev --prompt "red panda" --output flux.ipynb
+      kdream colab generate musicgen-large --output musicgen.ipynb
+    """
+    try:
+        from kdream.core.runner import _resolve_recipe
+        from kdream.backends.colab import ColabBackend
+
+        r = _resolve_recipe(recipe)
+
+        inputs: dict = {}
+        if prompt is not None:
+            inputs["prompt"] = prompt
+        if steps is not None:
+            inputs["steps"] = steps
+        if seed is not None:
+            inputs["seed"] = seed
+
+        backend = ColabBackend(gdrive_credentials=gdrive_credentials)
+        nb_path = backend.generate_notebook(r, inputs=inputs or None, output_path=output)
+
+        console.print(
+            f"\n[bold green]✓ Notebook generated:[/bold green] [cyan]{nb_path}[/cyan]"
+        )
+        console.print(
+            "\nTo run in Colab:\n"
+            "1. Go to [link]https://colab.research.google.com[/link]\n"
+            "2. File \u2192 Upload notebook \u2192 select the file above\n"
+            "3. Runtime \u2192 Run all  (Ctrl+F9)"
+        )
+        if not gdrive_credentials:
+            console.print(
+                "\n[dim]Tip: use --gdrive-credentials <service-account.json> to upload\n"
+                "automatically and get a direct Colab URL.[/dim]"
+            )
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@cli.group()
 def explore():
     """Explore the latest AI models on HuggingFace Hub."""
 
