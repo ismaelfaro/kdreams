@@ -1,0 +1,73 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: playground-v2-5
+  version: 1.0.0
+  description: Playground v2.5 — aesthetic text-to-image model excelling in vibrant colours and fine details at 1024×1024
+  tags: [image-generation, diffusion, text-to-image, playground, aesthetic]
+  license: playground-v2dot5-community
+  author: kdream-community
+
+source:
+  repo: https://github.com/huggingface/diffusers
+  ref: main
+  install_extras: []
+
+models:
+  - name: playground-v2-5
+    source: huggingface
+    id: playgroundai/playground-v2.5-1024px-aesthetic
+    destination: models/playground-v2-5
+
+entrypoint:
+  script: examples/text_to_image/inference.py
+  type: python
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the image to generate
+  negative_prompt:
+    type: string
+    default: "ugly, deformed, noisy, blurry, low contrast"
+    description: What to avoid in the generated image
+  width:
+    type: integer
+    default: 1024
+    min: 256
+    max: 2048
+    description: Output image width in pixels
+  height:
+    type: integer
+    default: 1024
+    min: 256
+    max: 2048
+    description: Output image height in pixels
+  steps:
+    type: integer
+    default: 50
+    min: 1
+    max: 100
+    description: Number of denoising steps
+  guidance_scale:
+    type: float
+    default: 3.0
+    min: 0.0
+    max: 10.0
+    description: Guidance scale (EDM formulation)
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: image
+    type: file
+    path: outputs/{timestamp}.png
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 8
+    tested_on: [cuda]

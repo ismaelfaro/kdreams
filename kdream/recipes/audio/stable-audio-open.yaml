@@ -1,0 +1,73 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: stable-audio-open
+  version: 1.0.0
+  description: Stable Audio Open 1.0 by Stability AI — open model for text-to-audio and audio variation generation up to 47 seconds
+  tags: [audio, text-to-audio, sound-effects, music, stability-ai]
+  license: Stability-AI-Community
+  author: kdream-community
+
+source:
+  repo: https://github.com/Stability-AI/stable-audio-tools
+  ref: main
+  install_extras: []
+
+models:
+  - name: stable-audio-open-1.0
+    source: huggingface
+    id: stabilityai/stable-audio-open-1.0
+    destination: models/stable-audio-open
+
+entrypoint:
+  script: run_gradio.py
+  type: gradio
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the audio to generate (e.g. "lo-fi hip hop, 85 BPM, vinyl crackle")
+  negative_prompt:
+    type: string
+    default: "low quality, noise, distortion"
+    description: What to avoid in the generated audio
+  seconds_start:
+    type: float
+    default: 0.0
+    min: 0.0
+    max: 47.0
+    description: Start time in seconds for the generated clip
+  seconds_total:
+    type: float
+    default: 30.0
+    min: 1.0
+    max: 47.0
+    description: Total duration of generated audio in seconds
+  steps:
+    type: integer
+    default: 100
+    min: 10
+    max: 300
+    description: Number of diffusion steps
+  cfg_scale:
+    type: float
+    default: 7.0
+    min: 1.0
+    max: 15.0
+    description: Classifier-free guidance scale
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: audio
+    type: file
+    path: outputs/{timestamp}.wav
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 8
+    tested_on: [cuda]

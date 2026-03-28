@@ -407,6 +407,57 @@ def _detect_accelerator() -> str:
     return "cpu"
 
 
+_ARCH_DESCRIPTIONS: dict[str, str] = {
+    "cuda": (
+        "NVIDIA GPU with CUDA support. "
+        "Full-precision (fp32/bf16/fp16) and quantized (GGUF/AWQ/GPTQ) models are supported. "
+        "Use safetensors or GGUF/AWQ/GPTQ variants where available. "
+        "Set backends.local.requires_gpu=true and populate min_vram_gb."
+    ),
+    "mps": (
+        "Apple Silicon Mac (MPS / Metal Performance Shaders). "
+        "GGUF models work well via llama-cpp-python. "
+        "AWQ and GPTQ are NOT supported on MPS — do NOT include them. "
+        "Use MPS-compatible libraries (mlx, torch with MPS backend, llama-cpp-python). "
+        "Set backends.local.requires_gpu=false (MPS is integrated memory)."
+    ),
+    "cpu": (
+        "CPU-only machine (no dedicated GPU). "
+        "Prefer quantized GGUF models for LLMs as they are the most efficient on CPU. "
+        "AWQ and GPTQ are NOT supported on CPU. "
+        "Set backends.local.requires_gpu=false and min_vram_gb=0. "
+        "Warn in the recipe description that inference will be slow."
+    ),
+}
+
+
+def _build_hw_context(target_arch: str, current_arch: str) -> str:
+    """Build a hardware context block to inject into agent prompts.
+
+    Args:
+        target_arch:  The desired target compute architecture (cuda/mps/cpu).
+        current_arch: The actual accelerator on the machine running kdream.
+
+    Returns:
+        A formatted string suitable for prepending to agent messages.
+    """
+    description = _ARCH_DESCRIPTIONS.get(target_arch, target_arch)
+    lines = [
+        "## Target Hardware Architecture",
+        f"Target accelerator: {target_arch.upper()}",
+        f"Description: {description}",
+    ]
+    if target_arch != current_arch:
+        lines.append(
+            f"Note: this recipe is being generated for {target_arch.upper()} "
+            f"but the current machine uses {current_arch.upper()}. "
+            "The recipe cannot be tested locally — mark tested_on=[\"" + target_arch + "\"] "
+            "and add a note in the description that it targets " + target_arch.upper() + "."
+        )
+    lines.append("")  # trailing newline
+    return "\n".join(lines) + "\n"
+
+
 def _detect_quantized_variants(
     files: list[str],
     file_sizes: dict[str, int] | None = None,
@@ -724,6 +775,7 @@ class RecipeGeneratorAgent:
         repo: str,
         output: str | None = None,
         publish: bool = False,
+        target_arch: str | None = None,
     ) -> Any:
         """Run the full 5-agent pipeline and return a parsed Recipe object.
 
@@ -739,12 +791,26 @@ class RecipeGeneratorAgent:
             6. HFScriptWriter — Runner script (conditional: HF or GitHub+quantized)
 
         Args:
-            repo:    GitHub repository URL or HuggingFace model URL.
-            output:  Optional path to write the generated YAML recipe.
-                     For HF models, a companion ``run.py`` is written next to it.
-            publish: If True, open a PR to the registry (not yet implemented).
+            repo:        GitHub repository URL or HuggingFace model URL.
+            output:      Optional path to write the generated YAML recipe.
+                         For HF models, a companion ``run.py`` is written next to it.
+            publish:     If True, open a PR to the registry (not yet implemented).
+            target_arch: Target compute architecture for the recipe: ``"cuda"``,
+                         ``"mps"``, or ``"cpu"``. ``None`` (default) auto-detects
+                         the current machine's accelerator.
         """
         from kdream.core.recipe import parse_yaml_recipe, validate_recipe
+
+        # ── Determine target architecture ─────────────────────────────────
+        current_arch = _detect_accelerator()
+        effective_arch = (target_arch or current_arch).lower()
+        if effective_arch not in ("cuda", "mps", "cpu"):
+            raise ValueError(
+                f"Unknown target architecture {effective_arch!r}. "
+                "Must be one of: cuda, mps, cpu."
+            )
+        cross_arch = effective_arch != current_arch
+        hw_context = _build_hw_context(effective_arch, current_arch)
 
         _is_hf = is_huggingface_url(repo)
         source_label = "HuggingFace model" if _is_hf else "GitHub repository"
@@ -754,15 +820,31 @@ class RecipeGeneratorAgent:
 
         total_steps = 6 if _is_hf else 5
 
+        arch_note = (
+            f"  Target arch: [bold yellow]{effective_arch.upper()}[/bold yellow] "
+            f"[dim](cross-arch — cannot be tested locally)[/dim]"
+            if cross_arch else
+            f"  Target arch: [bold green]{effective_arch.upper()}[/bold green] [dim](this machine)[/dim]"
+        )
+
         console.print(Panel(
             f"[bold]Recipe Generator[/bold]\n"
             f"{source_label}: [cyan]{repo}[/cyan]\n"
             "Pipeline: RepoInspector → ModelLocator → InferenceMapper "
             "→ RecipeWriter"
-            + (" → HFScriptWriter" if _is_hf else ""),
+            + (" → HFScriptWriter" if _is_hf else "")
+            + f"\n{arch_note}",
             title="kdream Agent",
             expand=False,
         ))
+
+        if cross_arch:
+            console.print(
+                f"[bold yellow]⚠ Cross-architecture mode:[/bold yellow] "
+                f"Generating for [bold]{effective_arch.upper()}[/bold] "
+                f"(current machine: [bold]{current_arch.upper()}[/bold]). "
+                "This recipe cannot be tested locally."
+            )
 
         selected_variant: dict[str, str] | None = None
 
@@ -837,6 +919,9 @@ class RecipeGeneratorAgent:
                     f"{repo_info['candidate_scripts'] or '(unavailable)'}"
                 )
 
+        # Prepend hardware context to base_msg so all agents are aware of the target arch.
+        base_msg = hw_context + base_msg
+
         # ── Step 2: RepoInspector ─────────────────────────────────────────
         console.print(f"\n[bold]2/{total_steps}[/bold] Inspecting repository structure…")
         repo_analysis = call_agent("repo-inspector", base_msg, self.client)
@@ -865,10 +950,12 @@ class RecipeGeneratorAgent:
         recipe_yaml_raw = call_agent(
             "recipe-writer",
             f"Repository URL: {repo}\n\n"
+            f"{hw_context}"
             f"## Repo Analysis\n{repo_analysis}\n\n"
             f"## Inference Mapping (entrypoint + parameters)\n{inference_info}\n\n"
             f"## Model Components\n{model_info}\n\n"
-            "Generate a complete kdream YAML recipe.",
+            "Generate a complete kdream YAML recipe. "
+            f"Set backends.local.tested_on to include \"{effective_arch}\".",
             self.client,
         )
 
@@ -886,6 +973,19 @@ class RecipeGeneratorAgent:
             console.print("[dim]Raw output:[/dim]\n" + yaml_content)
             raise
 
+        # ── Patch tested_on to reflect the target architecture ────────────
+        # Ensures the architecture context is recorded regardless of what the
+        # AI wrote (it may have left the list empty or guessed incorrectly).
+        if recipe.backends.local is not None:
+            if effective_arch not in recipe.backends.local.tested_on:
+                recipe.backends.local.tested_on.append(effective_arch)
+        elif cross_arch:
+            # No local spec in the recipe at all — nothing to patch, just note it.
+            console.print(
+                f"[dim]Note: no backends.local section found; "
+                f"target arch ({effective_arch}) recorded in console only.[/dim]"
+            )
+
         errors = validate_recipe(recipe)
         if errors:
             console.print(f"[yellow]Validation warnings ({len(errors)}):[/yellow]")
@@ -893,6 +993,8 @@ class RecipeGeneratorAgent:
                 console.print(f"  • {err}")
 
         # ── Step 6 (HF / hybrid): Generate companion runner script ────────
+        # (Runner script is generated before component verification so the
+        # verifier can see it when checking the entrypoint.)
         if _needs_script:
             console.print(f"\n[bold]6/{total_steps}[/bold] Generating companion runner script…")
             variant_ctx = ""
@@ -915,6 +1017,34 @@ class RecipeGeneratorAgent:
                 self.client,
             )
             recipe._runner_script = _extract_python(script_raw)
+
+        # ── Component verification ────────────────────────────────────────
+        console.print(f"\n[bold]{total_steps + 1}/{total_steps + 1}[/bold] Verifying components…")
+        from kdream.core.verifier import RecipeVerifier
+        verifier = RecipeVerifier()
+        verification = verifier.verify(recipe, runner_script=recipe._runner_script)
+
+        if verification.warnings:
+            console.print(
+                f"[yellow]⚠ {len(verification.warnings)} warning(s):[/yellow]"
+            )
+            for w in verification.warnings:
+                console.print(f"  [yellow]{w}[/yellow]")
+
+        if not verification.ok:
+            console.print(
+                f"\n[bold red]✗ Component verification failed "
+                f"({len(verification.errors)} error(s)):[/bold red]"
+            )
+            for err in verification.errors:
+                console.print(f"  [red]{err}[/red]")
+            console.print(
+                "\n[dim]The recipe has been generated but cannot be used until "
+                "the above issues are resolved.[/dim]"
+            )
+            verification.raise_if_errors()
+
+        console.print("[bold green]✓ All components verified.[/bold green]")
 
         # ── Save if requested ─────────────────────────────────────────────
         if output:

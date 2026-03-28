@@ -203,7 +203,16 @@ def list_recipes(tags, backend, search):
               help="Open a PR to the public registry.")
 @click.option("--format", "fmt", default="yaml",
               type=click.Choice(["yaml", "markdown"]), show_default=True)
-def generate(repo, output, publish, fmt):
+@click.option("--arch", "target_arch", default=None,
+              type=click.Choice(["auto", "cuda", "mps", "cpu"], case_sensitive=False),
+              show_default=True,
+              help=(
+                  "Target compute architecture for the generated recipe. "
+                  "auto (default) detects the current machine. "
+                  "Use cuda/mps/cpu to generate for a different architecture "
+                  "(recipe will be marked as untested)."
+              ))
+def generate(repo, output, publish, fmt, target_arch):
     """Generate a kdream recipe from a GitHub or HuggingFace repository using AI agents.
 
     \b
@@ -215,12 +224,17 @@ def generate(repo, output, publish, fmt):
       kdream generate --repo https://github.com/Tongyi-MAI/Z-Image
       kdream generate --repo https://huggingface.co/stabilityai/sdxl-turbo
       kdream generate --repo https://github.com/nikopueringer/CorridorKey --output ./my-recipe.yaml
+      kdream generate --repo https://github.com/some/model --arch mps
+      kdream generate --repo https://github.com/some/model --arch cpu
     """
     from kdream.agents.recipe_generator import is_huggingface_url, normalize_github_url
 
     # Normalise GitHub URLs that include /tree/<branch>
     if not is_huggingface_url(repo):
         repo = normalize_github_url(repo)
+
+    # "auto" means let the agent detect the current machine
+    effective_arch = None if (target_arch is None or target_arch == "auto") else target_arch
 
     try:
         import kdream as k
@@ -229,7 +243,9 @@ def generate(repo, output, publish, fmt):
             title="Recipe Generator",
             expand=False,
         ))
-        recipe = k.generate_recipe(repo=repo, output=output, publish=publish)
+        recipe = k.generate_recipe(
+            repo=repo, output=output, publish=publish, target_arch=effective_arch
+        )
         console.print(f"\n[bold green]✓ Recipe generated:[/bold green] {recipe.metadata.name}")
 
         # If no --output was given, save to kdream/recipes/<category>/<name>.yaml
@@ -311,12 +327,19 @@ def packages(cache_dir):
 
 @cli.command()
 @click.argument("recipe_file")
-def validate(recipe_file):
+@click.option("--skip-verify", is_flag=True, default=False,
+              help="Skip network component verification (models, entrypoint, repo).")
+def validate(recipe_file, skip_verify):
     """Validate a local recipe file.
 
+    By default, also verifies that all referenced components exist
+    (model IDs on HuggingFace, URLs, entrypoint scripts in the repo).
+    Use --skip-verify to perform structural checks only.
+
     \b
-    Example:
+    Examples:
       kdream validate ./my-recipe.yaml
+      kdream validate ./my-recipe.yaml --skip-verify
     """
     try:
         from kdream.core.recipe import load_recipe, validate_recipe
@@ -325,19 +348,45 @@ def validate(recipe_file):
 
         if errors:
             console.print(
-                f"[bold red]✗ Validation failed ({len(errors)} error(s)):[/bold red]"
+                f"[bold red]✗ Structural validation failed ({len(errors)} error(s)):[/bold red]"
             )
             for err in errors:
                 console.print(f"  • {err}")
             sys.exit(1)
-        else:
+
+        console.print(
+            f"[bold green]✓ Structure valid:[/bold green] "
+            f"{recipe.metadata.name} v{recipe.metadata.version}"
+        )
+        console.print(f"  Inputs:  {len(recipe.inputs)}")
+        console.print(f"  Models:  {len(recipe.models)}")
+        console.print(f"  Outputs: {len(recipe.outputs)}")
+
+        if skip_verify:
+            console.print("[dim]  (component verification skipped)[/dim]")
+            return
+
+        console.print("\n[dim]Verifying components…[/dim]")
+        from kdream.core.verifier import RecipeVerifier
+        verification = RecipeVerifier().verify(recipe)
+
+        if verification.warnings:
+            for w in verification.warnings:
+                console.print(f"  [yellow]{w}[/yellow]")
+
+        if not verification.ok:
             console.print(
-                f"[bold green]✓ Valid:[/bold green] "
-                f"{recipe.metadata.name} v{recipe.metadata.version}"
+                f"\n[bold red]✗ Component verification failed "
+                f"({len(verification.errors)} error(s)):[/bold red]"
             )
-            console.print(f"  Inputs:  {len(recipe.inputs)}")
-            console.print(f"  Models:  {len(recipe.models)}")
-            console.print(f"  Outputs: {len(recipe.outputs)}")
+            for err in verification.errors:
+                console.print(f"  [red]{err}[/red]")
+            sys.exit(1)
+
+        console.print("[bold green]✓ All components verified.[/bold green]")
+
+    except SystemExit:
+        raise
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         sys.exit(1)
@@ -504,6 +553,151 @@ def info(recipe):
 
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@cli.group()
+def explore():
+    """Explore the latest AI models on HuggingFace Hub."""
+
+
+@explore.command(name="hf")
+@click.option("--query", "-q", default=None,
+              help="Free-text search query (model name or keyword).")
+@click.option("--task", "-t", default=None,
+              help=(
+                  "Filter by task, e.g. text-to-image, text-generation, "
+                  "audio-generation, video-generation, transcription…"
+              ))
+@click.option("--limit", "-n", default=20, show_default=True,
+              help="Maximum number of models to show.")
+@click.option("--sort", default="likes",
+              type=click.Choice(["likes", "downloads", "lastModified"]),
+              show_default=True,
+              help="Sort results by this field (descending).")
+@click.option("--author", default=None,
+              help="Filter by HuggingFace author / organisation.")
+@click.option("--generate", "do_generate", is_flag=True, default=False,
+              help="Interactively pick a model and auto-generate a kdream recipe.")
+@click.option("--output", default=None,
+              help="Output path for the generated recipe (requires --generate).")
+def explore_hf(query, task, limit, sort, author, do_generate, output):
+    """Browse the latest models on HuggingFace Hub.
+
+    \b
+    Examples:
+      kdream explore hf --task text-to-image
+      kdream explore hf --query flux --limit 10
+      kdream explore hf --task text-generation --sort downloads
+      kdream explore hf --task text-to-image --generate
+      kdream explore hf --author stabilityai
+    """
+    from kdream.hub import HF_TASK_ALIASES, search_hf_models
+
+    try:
+        with console.status("[dim]Fetching models from HuggingFace Hub…[/dim]"):
+            models = search_hf_models(
+                query=query,
+                task=task,
+                limit=limit,
+                sort=sort,
+                author=author,
+            )
+    except Exception as exc:
+        console.print(f"[bold red]Error fetching models:[/bold red] {exc}")
+        sys.exit(1)
+
+    if not models:
+        console.print("[yellow]No models found. Try different filters.[/yellow]")
+        return
+
+    # ── Build display table ────────────────────────────────────────────────
+    sort_label = {"likes": "♥ Likes", "downloads": "↓ Downloads", "lastModified": "Updated"}
+    title = "HuggingFace Hub"
+    parts: list[str] = []
+    if query:
+        parts.append(f'query="{query}"')
+    if task:
+        parts.append(f"task={task}")
+    if author:
+        parts.append(f"author={author}")
+    if parts:
+        title += "  [dim](" + ", ".join(parts) + ")[/dim]"
+
+    table = Table(title=title, show_header=True, header_style="bold cyan", show_lines=False)
+    table.add_column("#",           style="dim",    width=3,  justify="right")
+    table.add_column("Model ID",    style="cyan",   min_width=30)
+    table.add_column("Task",        style="green",  min_width=16)
+    table.add_column(sort_label.get(sort, sort), style="yellow", justify="right", min_width=8)
+    table.add_column("License",     style="dim",    min_width=10)
+    table.add_column("Updated",     style="dim",    min_width=10)
+
+    for i, m in enumerate(models, start=1):
+        sort_val = (
+            f"{m.likes:,}" if sort == "likes"
+            else f"{m.downloads:,}" if sort == "downloads"
+            else m.last_modified
+        )
+        table.add_row(
+            str(i),
+            m.model_id,
+            m.task_display or m.task or "—",
+            sort_val,
+            m.license or "—",
+            m.last_modified or "—",
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[dim]Showing {len(models)} of up to {limit} results · "
+        f"sorted by {sort} · "
+        f"source: huggingface.co[/dim]"
+    )
+
+    # ── Optional: interactive recipe generation ───────────────────────────
+    if not do_generate:
+        console.print(
+            "\n[dim]Tip: add [bold]--generate[/bold] to pick a model and "
+            "create a kdream recipe automatically.[/dim]"
+        )
+        return
+
+    console.print()
+    choice = click.prompt(
+        f"Enter model # (1-{len(models)}) to generate a recipe, or 0 to cancel",
+        type=click.IntRange(0, len(models)),
+        default=0,
+    )
+    if choice == 0:
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    selected = models[choice - 1]
+    hf_url = selected.hf_url
+    console.print(f"\nGenerating recipe for [cyan]{selected.model_id}[/cyan]…")
+
+    try:
+        import kdream as k
+        recipe = k.generate_recipe(repo=hf_url, output=output, publish=False)
+        console.print(f"\n[bold green]✓ Recipe generated:[/bold green] {recipe.metadata.name}")
+
+        if not output:
+            category = recipe.metadata.tags[0] if recipe.metadata.tags else "uncategorized"
+            _recipes_root = Path(__file__).parent / "recipes"
+            default_out = _recipes_root / category / f"{recipe.metadata.name}.yaml"
+            default_out.parent.mkdir(parents=True, exist_ok=True)
+            from kdream.core.recipe import recipe_to_yaml
+            default_out.write_text(recipe_to_yaml(recipe), encoding="utf-8")
+            console.print(f"  Saved to: [cyan]{default_out}[/cyan]")
+        else:
+            console.print(f"  Saved to: [cyan]{output}[/cyan]")
+
+        console.print(
+            f"\n[dim]Run it with: "
+            f"kdream run {recipe.metadata.name} --prompt \"your prompt\"[/dim]"
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Error generating recipe:[/bold red] {exc}")
         sys.exit(1)
 
 

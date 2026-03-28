@@ -16,6 +16,7 @@ from kdream.core.recipe import Recipe, load_recipe, validate_recipe
 from kdream.core.runner import RunResult, PackageInfo, run, install, list_installed
 from kdream.backends.local import detect_accelerator
 from kdream.exceptions import KdreamError, RecipeError, RegistryError, BackendError
+from kdream.hub import HFModel, search_hf_models
 
 __version__ = "0.10.4"
 
@@ -41,21 +42,26 @@ def generate_recipe(
     repo: str,
     output: str | None = None,
     publish: bool = False,
+    target_arch: str | None = None,
 ) -> Recipe:
     """Generate a kdream recipe from a GitHub repository using AI agents.
 
     Requires ``ANTHROPIC_API_KEY`` environment variable.
 
     Args:
-        repo:    GitHub repository URL to analyse.
-        output:  Optional path to write the generated YAML recipe.
-        publish: Open a PR to the public registry (Phase 1: not yet implemented).
+        repo:        GitHub repository URL to analyse.
+        output:      Optional path to write the generated YAML recipe.
+        publish:     Open a PR to the public registry (Phase 1: not yet implemented).
+        target_arch: Target compute architecture: ``"cuda"``, ``"mps"``, or ``"cpu"``.
+                     ``None`` (default) auto-detects the current machine's accelerator.
 
     Returns:
         Generated :class:`~kdream.core.recipe.Recipe`.
     """
     from kdream.agents.recipe_generator import RecipeGeneratorAgent
-    return RecipeGeneratorAgent().generate(repo=repo, output=output, publish=publish)
+    return RecipeGeneratorAgent().generate(
+        repo=repo, output=output, publish=publish, target_arch=target_arch
+    )
 
 
 __all__ = [
@@ -64,12 +70,14 @@ __all__ = [
     "list_recipes",
     "list_installed",
     "generate_recipe",
+    "search_hf_models",
     "detect_accelerator",
     "load_recipe",
     "validate_recipe",
     "Recipe",
     "RunResult",
     "PackageInfo",
+    "HFModel",
     "KdreamError",
     "RecipeError",
     "RegistryError",

@@ -58,7 +58,7 @@ class TestHelp:
 
 class TestValidateCommand:
     def test_validate_valid_recipe(self, runner, sample_recipe_file):
-        result = runner.invoke(cli, ["validate", str(sample_recipe_file)])
+        result = runner.invoke(cli, ["validate", str(sample_recipe_file), "--skip-verify"])
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 

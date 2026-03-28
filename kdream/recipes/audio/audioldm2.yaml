@@ -1,0 +1,73 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: audioldm2
+  version: 1.0.0
+  description: AudioLDM 2 — latent diffusion model for high-quality text-to-audio and text-to-music generation
+  tags: [audio, text-to-audio, text-to-music, diffusion, audioldm]
+  license: Apache-2.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/haoheliu/AudioLDM2
+  ref: main
+  install_extras: []
+
+models:
+  - name: audioldm2-full
+    source: huggingface
+    id: cvssp/audioldm2
+    destination: models/audioldm2
+
+entrypoint:
+  script: audioldm2/app.py
+  type: gradio
+
+inputs:
+  text:
+    type: string
+    required: true
+    description: Text description of the audio to generate
+  negative_text:
+    type: string
+    default: "low quality, noise, bad sound"
+    description: What to avoid in the generated audio
+  duration:
+    type: float
+    default: 10.0
+    min: 2.5
+    max: 30.0
+    description: Duration of generated audio in seconds
+  guidance_scale:
+    type: float
+    default: 3.5
+    min: 1.0
+    max: 10.0
+    description: Guidance scale for generation
+  ddim_steps:
+    type: integer
+    default: 200
+    min: 10
+    max: 500
+    description: Number of DDIM inference steps
+  n_candidate_gen_per_text:
+    type: integer
+    default: 3
+    min: 1
+    max: 8
+    description: Number of candidates to generate (best is selected)
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: audio
+    type: file
+    path: outputs/{timestamp}.wav
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 10
+    tested_on: [cuda]
