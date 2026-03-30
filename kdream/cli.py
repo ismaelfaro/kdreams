@@ -619,6 +619,110 @@ def colab_generate(recipe, output, gdrive_credentials, prompt, steps, seed):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# runpod group
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def runpod():
+    """RunPod.io cloud GPU backend — serverless endpoint deployment."""
+
+
+@runpod.command(name="generate")
+@click.argument("recipe")
+@click.option("--output-dir", "-o", default=None,
+              help="Directory to write Dockerfile and handler.py (default: cwd).")
+@click.option("--gpu-type", default="NVIDIA GeForce RTX 3090", show_default=True,
+              help="Preferred GPU type for the RunPod endpoint.")
+def runpod_generate(recipe, output_dir, gpu_type):
+    """Generate Dockerfile and handler.py for a recipe.
+
+    \b
+    Examples:
+      kdream runpod generate stable-diffusion-xl-base
+      kdream runpod generate flux-1-dev --gpu-type "NVIDIA A100 80GB PCIe"
+      kdream runpod generate musicgen-large --output-dir ./runpod-artifacts
+    """
+    try:
+        from kdream.core.runner import _resolve_recipe
+        from kdream.backends.runpod import RunPodBackend
+
+        r = _resolve_recipe(recipe)
+        backend = RunPodBackend(gpu_type=gpu_type)
+        dest = backend.generate_artifacts(r, output_dir=output_dir)
+
+        console.print(
+            f"\n[bold green]✓ RunPod artifacts generated:[/bold green] [cyan]{dest}[/cyan]"
+        )
+        console.print(
+            "\nNext steps:\n"
+            f"  1. docker build -t <user>/{recipe}:latest {dest}\n"
+            f"  2. docker push <user>/{recipe}:latest\n"
+            "  3. Register endpoint at runpod.io → Serverless → New Endpoint\n"
+            "  4. kdream run <recipe> --backend runpod --endpoint-id <id>"
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@runpod.command(name="pods")
+@click.option("--api-key", envvar="RUNPOD_API_KEY",
+              help="RunPod API key (default: RUNPOD_API_KEY env var).")
+def runpod_pods(api_key):
+    """List all running RunPod pods."""
+    try:
+        import runpod as rp  # type: ignore[import]
+        if api_key:
+            rp.api_key = api_key
+        pods = rp.get_pods()
+        if not pods:
+            console.print("[dim]No running pods found.[/dim]")
+            return
+        from rich.table import Table
+        t = Table("ID", "Name", "Status", "GPU")
+        for pod in pods:
+            t.add_row(
+                pod.get("id", ""),
+                pod.get("name", ""),
+                pod.get("desiredStatus", ""),
+                pod.get("machine", {}).get("gpuDisplayName", ""),
+            )
+        console.print(t)
+    except ImportError:
+        console.print(
+            "[bold red]Error:[/bold red] 'runpod' package not installed. "
+            "Run: pip install 'kdream[runpod]'"
+        )
+        sys.exit(1)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@runpod.command(name="terminate")
+@click.argument("pod_id")
+@click.option("--api-key", envvar="RUNPOD_API_KEY",
+              help="RunPod API key (default: RUNPOD_API_KEY env var).")
+def runpod_terminate(pod_id, api_key):
+    """Terminate a RunPod pod by ID."""
+    try:
+        import runpod as rp  # type: ignore[import]
+        if api_key:
+            rp.api_key = api_key
+        rp.terminate_pod(pod_id)
+        console.print(f"[green]✓ Pod {pod_id} terminated.[/green]")
+    except ImportError:
+        console.print(
+            "[bold red]Error:[/bold red] 'runpod' package not installed. "
+            "Run: pip install 'kdream[runpod]'"
+        )
+        sys.exit(1)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+
 @cli.group()
 def explore():
     """Explore the latest AI models on HuggingFace Hub."""

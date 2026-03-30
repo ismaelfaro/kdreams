@@ -83,9 +83,7 @@ addopts = "--cov=kdream --cov-report=term-missing --cov-report=html"
 
 [tool.coverage.run]
 source = ["kdream"]
-omit = [
-    "kdream/backends/runpod.py",
-]
+omit = []
 
 [tool.coverage.report]
 exclude_lines = [
