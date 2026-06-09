@@ -429,8 +429,8 @@ def info(recipe):
       kdream info ./my-recipe.yaml
     """
     try:
-        from kdream.core.runner import _resolve_recipe
         from kdream.backends.local import HardwareDetector
+        from kdream.core.runner import _resolve_recipe
 
         r = _resolve_recipe(recipe)
         hw = HardwareDetector().detect()
@@ -584,8 +584,8 @@ def colab_generate(recipe, output, gdrive_credentials, prompt, steps, seed):
       kdream colab generate musicgen-large --output musicgen.ipynb
     """
     try:
-        from kdream.core.runner import _resolve_recipe
         from kdream.backends.colab import ColabBackend
+        from kdream.core.runner import _resolve_recipe
 
         r = _resolve_recipe(recipe)
 
@@ -655,7 +655,7 @@ def explore_hf(query, task, limit, sort, author, do_generate, output):
       kdream explore hf --task text-to-image --generate
       kdream explore hf --author stabilityai
     """
-    from kdream.hub import HF_TASK_ALIASES, search_hf_models
+    from kdream.hub import search_hf_models
 
     try:
         with console.status("[dim]Fetching models from HuggingFace Hub…[/dim]"):

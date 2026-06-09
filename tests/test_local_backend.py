@@ -138,6 +138,123 @@ class TestModelManager:
             mgr.download_model(desc, tmp_path)
 
 
+def _mock_httpx_stream(chunks, *, status_code=200, content_length=None):
+    """Build a context-manager mock matching ``httpx.stream(...)`` usage."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.raise_for_status.return_value = None
+    if content_length is None:
+        content_length = sum(len(c) for c in chunks)
+    resp.headers = {"content-length": str(content_length)}
+    resp.iter_bytes.return_value = iter(chunks)
+
+    cm = MagicMock()
+    cm.__enter__.return_value = resp
+    cm.__exit__.return_value = False
+    return cm
+
+
+class TestFetchUrlIntegrity:
+    """The download must be atomic: never leave a truncated file at *dest*."""
+
+    def test_writes_to_part_then_renames(self, tmp_path):
+        mgr = ModelManager()
+        dest = tmp_path / "model.bin"
+        with patch("httpx.stream", return_value=_mock_httpx_stream([b"abc", b"def"])):
+            mgr.fetch_url("https://example.com/model.bin", dest)
+        assert dest.read_bytes() == b"abcdef"
+        # The temporary .part file must be gone after success.
+        assert not (tmp_path / "model.bin.part").exists()
+
+    def test_interrupted_download_leaves_no_dest_file(self, tmp_path):
+        mgr = ModelManager()
+        dest = tmp_path / "model.bin"
+
+        def boom():
+            yield b"partial"
+            raise ConnectionError("network dropped")
+
+        cm = _mock_httpx_stream([], content_length=100)
+        cm.__enter__.return_value.iter_bytes.return_value = boom()
+
+        with patch("httpx.stream", return_value=cm), pytest.raises(ModelDownloadError):
+            mgr.fetch_url("https://example.com/model.bin", dest)
+
+        # dest must NOT exist — only a resumable .part remains.
+        assert not dest.exists()
+        assert (tmp_path / "model.bin.part").read_bytes() == b"partial"
+
+    def test_resumes_from_existing_part(self, tmp_path):
+        mgr = ModelManager()
+        dest = tmp_path / "model.bin"
+        part = tmp_path / "model.bin.part"
+        part.write_bytes(b"abc")  # 3 bytes already downloaded
+
+        captured = {}
+
+        def fake_stream(method, url, **kwargs):
+            captured["headers"] = kwargs.get("headers", {})
+            return _mock_httpx_stream([b"def"], status_code=206, content_length=3)
+
+        with patch("httpx.stream", side_effect=fake_stream):
+            mgr.fetch_url("https://example.com/model.bin", dest)
+
+        assert captured["headers"].get("Range") == "bytes=3-"
+        assert dest.read_bytes() == b"abcdef"
+
+    def test_server_ignores_range_restarts(self, tmp_path):
+        mgr = ModelManager()
+        dest = tmp_path / "model.bin"
+        part = tmp_path / "model.bin.part"
+        part.write_bytes(b"stale")  # leftover that server can't resume
+
+        # Server returns 200 (full content) despite the Range request.
+        with patch(
+            "httpx.stream",
+            return_value=_mock_httpx_stream([b"fullbody"], status_code=200),
+        ):
+            mgr.fetch_url("https://example.com/model.bin", dest)
+
+        # Must overwrite, not append to the stale bytes.
+        assert dest.read_bytes() == b"fullbody"
+
+    def test_skips_when_dest_already_present(self, tmp_path):
+        mgr = ModelManager()
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"existing")
+        with patch("httpx.stream") as mock_stream:
+            mgr.fetch_url("https://example.com/model.bin", dest)
+            mock_stream.assert_not_called()
+        assert dest.read_bytes() == b"existing"
+
+
+class TestDownloadDestinationSafety:
+    """download_model must reject destinations that escape the cache dir."""
+
+    @pytest.mark.parametrize("bad", ["../escape", "../../etc/passwd", "/abs/path"])
+    def test_path_traversal_rejected(self, tmp_path, bad):
+        from kdream.core.recipe import ModelDescriptor
+        mgr = ModelManager()
+        desc = ModelDescriptor(
+            name="x", source="url", id="https://example.com/m.bin", destination=bad
+        )
+        with patch.object(mgr, "fetch_url"):
+            with pytest.raises(ModelDownloadError, match="Unsafe model destination"):
+                mgr.download_model(desc, tmp_path)
+
+    def test_normal_destination_allowed(self, tmp_path):
+        from kdream.core.recipe import ModelDescriptor
+        mgr = ModelManager()
+        desc = ModelDescriptor(
+            name="x", source="url", id="https://example.com/m.bin",
+            destination="models/sub/x",
+        )
+        with patch.object(mgr, "fetch_url") as mock_url:
+            result = mgr.download_model(desc, tmp_path)
+            mock_url.assert_called_once()
+        assert str(result).startswith(str(tmp_path.resolve()))
+
+
 class TestInferenceRunner:
     def test_build_command_basic(self, tmp_path, sample_yaml_recipe):
         from kdream.core.recipe import parse_yaml_recipe

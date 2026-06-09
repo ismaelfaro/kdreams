@@ -282,7 +282,7 @@ def search_hf_quantized_alternatives(repo_url: str) -> dict[str, Any] | None:
     # (contain gguf/awq/gptq in name or tags) and models from the same org
     def _relevance_score(model: Any) -> tuple[int, int]:
         mid_lower = model.id.lower()
-        tags = set(t.lower() for t in (getattr(model, "tags", None) or []))
+        tags = {t.lower() for t in (getattr(model, "tags", None) or [])}
         score = 0
         # Boost for quantized format indicators
         if "gguf" in mid_lower or "gguf" in tags:
@@ -866,9 +866,7 @@ class RecipeGeneratorAgent:
             except Exception as exc:
                 console.print(f"[yellow]Warning:[/yellow] Could not clone repo ({exc}). "
                               "Using URL-only analysis.")
-                repo_info = {k: "" for k in
-                             ["url", "tree", "readme", "requirements", "setup_py", "pyproject",
-                              "candidate_scripts"]}
+                repo_info = dict.fromkeys(["url", "tree", "readme", "requirements", "setup_py", "pyproject", "candidate_scripts"], "")
                 repo_info["url"] = repo
 
             # Search HuggingFace for quantized alternatives

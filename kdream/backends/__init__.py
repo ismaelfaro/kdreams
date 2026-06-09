@@ -1,5 +1,5 @@
-from kdream.backends.local import LocalBackend
 from kdream.backends.colab import ColabBackend
+from kdream.backends.local import LocalBackend
 from kdream.backends.runpod import RunPodBackend
 
 BACKENDS = {

@@ -7,7 +7,6 @@ from typing import Any
 
 from kdream.core.recipe import Recipe, load_recipe
 from kdream.core.registry import RegistryClient
-from kdream.exceptions import BackendError, RecipeError
 
 DEFAULT_CACHE_DIR = Path.home() / ".kdream" / "cache"
 

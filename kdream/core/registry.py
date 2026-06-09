@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import httpx
-import yaml
 
 from kdream.core.recipe import Recipe, RecipeMetadata, parse_yaml_recipe
 from kdream.exceptions import RegistryError

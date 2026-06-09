@@ -14,7 +14,6 @@ from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
-    SpinnerColumn,
     TextColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
@@ -159,7 +158,7 @@ class EnvironmentManager:
         self,
         repo_path: Path,
         venv_path: Path,
-        extras: list[str] = [],
+        extras: list[str] | None = None,
         verbose: bool = False,
         skip_package_install: bool = False,
     ) -> None:
@@ -170,6 +169,7 @@ class EnvironmentManager:
           2. The package itself via ``uv pip install .`` if setup.py or pyproject.toml exists
           3. Any extra requirements files declared in the recipe
         """
+        extras = extras or []
         python_bin = venv_path / "bin" / "python"
         if not python_bin.exists():
             python_bin = venv_path / "Scripts" / "python.exe"
@@ -331,24 +331,37 @@ class ModelManager:
                 raise ModelDownloadError(f"Failed to download {repo_id}: {e}") from e
 
     def fetch_url(self, url: str, dest: Path) -> None:
-        """Download a file from *url* to *dest* with resume support."""
+        """Download a file from *url* to *dest*.
+
+        The download streams into a sibling ``.part`` file and is only
+        atomically renamed to *dest* once it completes successfully, so an
+        interrupted transfer never leaves a truncated file that later looks
+        "already downloaded". If a ``.part`` file from a previous attempt
+        exists, the download resumes from where it left off (when the server
+        supports HTTP range requests).
+        """
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             console.print(f"  [dim]File already at {dest}[/dim]")
             return
 
+        part = dest.with_name(dest.name + ".part")
         console.print(f"  Downloading [cyan]{url}[/cyan] ...")
         try:
             import httpx  # type: ignore[import]
 
             headers: dict[str, str] = {}
-            resume_pos = 0
-            if dest.exists():
-                resume_pos = dest.stat().st_size
+            resume_pos = part.stat().st_size if part.exists() else 0
+            if resume_pos:
                 headers["Range"] = f"bytes={resume_pos}-"
 
             with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=60) as r:
                 r.raise_for_status()
+
+                # If we asked to resume but the server ignored the Range header
+                # (status 200 instead of 206), start over from byte 0.
+                if resume_pos and r.status_code != 206:
+                    resume_pos = 0
                 total = int(r.headers.get("content-length", 0)) + resume_pos
 
                 with Progress(
@@ -363,10 +376,12 @@ class ModelManager:
                     progress.advance(task, resume_pos)
 
                     mode = "ab" if resume_pos else "wb"
-                    with open(dest, mode) as f:
+                    with open(part, mode) as f:
                         for chunk in r.iter_bytes(chunk_size=65536):
                             f.write(chunk)
                             progress.advance(task, len(chunk))
+
+            part.replace(dest)
         except Exception as e:
             raise ModelDownloadError(f"Download failed: {e}") from e
 
@@ -379,14 +394,20 @@ class ModelManager:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
+        if dest.exists():
+            console.print(f"  [dim]File already at {dest}[/dim]")
+            return
+
         dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
         console.print(f"  Downloading CIVITAI model [cyan]{model_id}[/cyan] ...")
         try:
             with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=60) as r:
                 r.raise_for_status()
-                with open(dest, "wb") as f:
+                with open(part, "wb") as f:
                     for chunk in r.iter_bytes(65536):
                         f.write(chunk)
+            part.replace(dest)
         except Exception as e:
             raise ModelDownloadError(f"CIVITAI download failed: {e}") from e
 
@@ -398,9 +419,26 @@ class ModelManager:
                 h.update(chunk)
         return h.hexdigest().lower() == expected_sha256.lower()
 
+    @staticmethod
+    def _safe_dest(models_dir: Path, destination: str) -> Path:
+        """Resolve *destination* under *models_dir*, rejecting path traversal.
+
+        Recipes can come from the public registry, so a malicious or buggy
+        ``destination`` (absolute path or ``../`` segments) must never let a
+        download escape the cache directory.
+        """
+        base = models_dir.resolve()
+        dest = (models_dir / destination).resolve()
+        if dest != base and base not in dest.parents:
+            raise ModelDownloadError(
+                f"Unsafe model destination {destination!r}: "
+                "resolves outside the cache directory."
+            )
+        return dest
+
     def download_model(self, model_desc: ModelDescriptor, models_dir: Path) -> Path:
         """Route to the correct fetcher and return local model path."""
-        dest = models_dir / model_desc.destination
+        dest = self._safe_dest(models_dir, model_desc.destination)
         src = model_desc.source
         if src == "huggingface":
             self.fetch_hf(model_desc.id, dest, file_path=model_desc.file_path)
@@ -609,15 +647,15 @@ class LocalBackend(AbstractBackend):
                           + f" | cache: {cache_dir}[/dim]")
 
         # 1. Clone repo
-        console.print(f"\n[bold][1/4][/bold] Cloning repo")
+        console.print("\n[bold][1/4][/bold] Cloning repo")
         self.env_manager.clone_repo(recipe.source.repo, recipe.source.ref, repo_path)
 
         # 2. Create venv
-        console.print(f"\n[bold][2/4][/bold] Creating virtual environment")
+        console.print("\n[bold][2/4][/bold] Creating virtual environment")
         self.env_manager.create_venv(venv_path, verbose=self.verbose)
 
         # 3. Install dependencies
-        console.print(f"\n[bold][3/4][/bold] Installing dependencies")
+        console.print("\n[bold][3/4][/bold] Installing dependencies")
         self.env_manager.install_deps(
             repo_path, venv_path, recipe.source.install_extras,
             verbose=self.verbose,
@@ -625,7 +663,7 @@ class LocalBackend(AbstractBackend):
         )
 
         # 4. Download models
-        console.print(f"\n[bold][4/4][/bold] Downloading models"
+        console.print("\n[bold][4/4][/bold] Downloading models"
                       + (f" ({len(recipe.models)})" if recipe.models else ""))
         if recipe.models:
             for model in recipe.models:
@@ -655,11 +693,11 @@ class LocalBackend(AbstractBackend):
             from kdream.core.registry import RegistryClient
             try:
                 recipe = RegistryClient().fetch_recipe(package.recipe_name)
-            except Exception:
+            except Exception as e:
                 raise BackendError(
                     f"Could not load recipe for '{package.recipe_name}'. "
                     "Re-install with force_reinstall=True."
-                )
+                ) from e
 
         errors = self.validate_inputs(recipe, inputs)
         if errors:
@@ -713,7 +751,7 @@ class LocalBackend(AbstractBackend):
 
         if rc != 0:
             # Always show stderr on failure, even in non-verbose mode
-            console.print(f"[dim]--- stderr ---[/dim]")
+            console.print("[dim]--- stderr ---[/dim]")
             console.print(stderr[-3000:].rstrip())
             raise BackendError(f"Inference failed (exit code {rc}).")
 

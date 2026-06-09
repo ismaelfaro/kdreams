@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 # Task aliases: user-friendly name → HF pipeline tag
 HF_TASK_ALIASES: dict[str, str] = {
@@ -163,8 +162,8 @@ def search_hf_models(
 def get_hf_model_readme(model_id: str) -> str:
     """Fetch the README/model card text for a HuggingFace model."""
     try:
+
         from huggingface_hub import hf_hub_download  # type: ignore[import]
-        import os
         path = hf_hub_download(model_id, filename="README.md")
         with open(path, encoding="utf-8", errors="replace") as f:
             return f.read()

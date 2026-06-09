@@ -43,7 +43,7 @@ class NgrokTunnel:
             self._tunnel = None
             self.public_url = None
 
-    def __enter__(self) -> "NgrokTunnel":
+    def __enter__(self) -> NgrokTunnel:
         self.start()
         return self
 

@@ -5,12 +5,11 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 import pydantic
+import yaml
 from pydantic import BaseModel, field_validator
 
 from kdream.exceptions import RecipeError
-
 
 # ---------------------------------------------------------------------------
 # Pydantic models

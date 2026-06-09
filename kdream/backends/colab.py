@@ -174,7 +174,7 @@ class NotebookBuilder:
                     f"# Download model: {model.name}",
                     "try:",
                     "    from huggingface_hub import snapshot_download",
-                    f"    snapshot_download(",
+                    "    snapshot_download(",
                     f"        repo_id={model.id!r},",
                     f"        local_dir={dest_expr},",
                     "        ignore_patterns=['*.msgpack', '*.h5', 'flax_model*'],",
@@ -353,11 +353,11 @@ class GoogleDriveUploader:
             from google.oauth2 import service_account  # type: ignore[import]
             from googleapiclient.discovery import build  # type: ignore[import]
             from googleapiclient.http import MediaFileUpload  # type: ignore[import]
-        except ImportError:
+        except ImportError as e:
             raise BackendError(
                 "Google Drive upload requires 'google-auth' and 'google-api-python-client'.\n"
                 "Install them with: pip install 'kdream[colab]'"
-            )
+            ) from e
 
         creds = service_account.Credentials.from_service_account_file(
             self.credentials_path, scopes=self.SCOPES
