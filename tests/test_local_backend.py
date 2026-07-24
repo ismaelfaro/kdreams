@@ -74,6 +74,50 @@ class TestEnvironmentManager:
         result = EnvironmentManager._find_all_requirements(tmp_path)
         assert result == []
 
+    def test_install_deps_installs_bare_package_extras(self, tmp_path):
+        """Extras that are not requirements files in the repo are installed as
+        packages (e.g. torch), not silently skipped. Regression: recipes
+        generated from HF models list install_extras like ['torch', 'diffusers']
+        and the venv was left without torch."""
+        repo = tmp_path / "repo"
+        repo.mkdir()  # no requirements*.txt, no setup.py/pyproject.toml
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").touch()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            EnvironmentManager().install_deps(
+                repo, venv, extras=["torch", "diffusers"], verbose=True
+            )
+
+        cmds = [call.args[0] for call in mock_run.call_args_list]
+        pkg_cmd = next(
+            (c for c in cmds if "install" in c and "torch" in c and "diffusers" in c),
+            None,
+        )
+        assert pkg_cmd is not None, f"no package install cmd in {cmds}"
+        assert "-r" not in pkg_cmd  # installed as packages, not as a req file
+
+    def test_install_deps_extra_that_is_a_repo_file_uses_dash_r(self, tmp_path):
+        """An extra naming an existing requirements file in the repo is installed
+        with -r, not treated as a package name."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements-extra.txt").write_text("numpy\n")
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").touch()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            EnvironmentManager().install_deps(
+                repo, venv, extras=["requirements-extra.txt"], verbose=True
+            )
+
+        cmds = [call.args[0] for call in mock_run.call_args_list]
+        assert any("-r" in c and c[-1].endswith("requirements-extra.txt") for c in cmds)
+
 
 class TestModelManager:
     def test_verify_correct_checksum(self, tmp_path):

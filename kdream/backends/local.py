@@ -168,7 +168,9 @@ class EnvironmentManager:
         Installs in order:
           1. Every requirements*.txt / requirements/*.txt found
           2. The package itself via ``uv pip install .`` if setup.py or pyproject.toml exists
-          3. Any extra requirements files declared in the recipe
+          3. Extras declared in the recipe — each is a path to a requirements
+             file inside the repo if such a file exists, otherwise a bare
+             package name (e.g. ``torch``, ``diffusers``) installed directly.
         """
         extras = extras or []
         python_bin = venv_path / "bin" / "python"
@@ -231,15 +233,27 @@ class EnvironmentManager:
         elif has_installable and skip_package_install:
             console.print("  [dim]Skipping package install (skip_package_install=true)[/dim]")
 
-        # 3. Extra requirements files declared in the recipe
+        # 3. Extras declared in the recipe: a requirements file inside the repo,
+        #    or a bare package name (e.g. "torch") installed directly.
+        packages: list[str] = []
         for extra in extras:
             extra_path = repo_path / extra
-            if extra_path.exists():
+            if extra_path.is_file():
                 console.print(f"  Installing extra deps from [cyan]{extra}[/cyan] ...")
                 _run(
                     ["uv", "pip", "install", "--python", str(python_bin), "-r", str(extra_path)],
                     extra,
                 )
+            else:
+                packages.append(extra)
+        if packages:
+            console.print(
+                f"  Installing packages: [cyan]{', '.join(packages)}[/cyan] ..."
+            )
+            _run(
+                ["uv", "pip", "install", "--python", str(python_bin), *packages],
+                "packages",
+            )
 
     @staticmethod
     def _find_all_requirements(repo_path: Path) -> list[Path]:
