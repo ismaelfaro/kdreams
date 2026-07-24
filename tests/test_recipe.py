@@ -1,6 +1,8 @@
 """Tests for kdream.core.recipe — parsing and validation."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kdream.core.recipe import (
@@ -159,3 +161,26 @@ class TestInputValidation:
         recipe = parse_yaml_recipe(sample_yaml_recipe)
         errors = self._backend().validate_inputs(recipe, {"prompt": "x", "steps": 999})
         assert any("steps" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Bundled recipes — every shipped YAML must parse and validate cleanly.
+# Regression guard: musicgen-melody.yaml once shipped with `type: file` on an
+# input (InputSpec only allows string/integer/float/boolean), so `kdream
+# validate` failed on a recipe we ship. This keeps that from recurring.
+# ---------------------------------------------------------------------------
+_RECIPES_DIR = Path(__file__).resolve().parent.parent / "kdream" / "recipes"
+_BUNDLED_RECIPES = sorted(_RECIPES_DIR.rglob("*.yaml"))
+
+
+def test_bundled_recipes_exist():
+    assert _BUNDLED_RECIPES, f"no bundled recipes found under {_RECIPES_DIR}"
+
+
+@pytest.mark.parametrize(
+    "recipe_path", _BUNDLED_RECIPES, ids=lambda p: p.name
+)
+def test_bundled_recipe_parses_and_validates(recipe_path):
+    recipe = parse_yaml_recipe(recipe_path.read_text())
+    errors = validate_recipe(recipe)
+    assert not errors, f"{recipe_path.name}: {errors}"

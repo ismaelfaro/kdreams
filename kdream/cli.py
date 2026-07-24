@@ -11,11 +11,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from kdream import __version__
+
 console = Console()
 
 
 @click.group()
-@click.version_option(version="0.10.1", prog_name="kdream")
+@click.version_option(version=__version__, prog_name="kdream")
 def cli():
     """kdream — Run any AI model with a single command.
 
