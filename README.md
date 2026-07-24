@@ -53,7 +53,7 @@ Verify the install:
 
 ```bash
 kdream --version
-# kdream, version 0.9.1
+# kdream, version 0.10.4
 ```
 
 ---

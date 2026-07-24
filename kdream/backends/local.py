@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
 import shutil
 import subprocess
@@ -167,7 +168,9 @@ class EnvironmentManager:
         Installs in order:
           1. Every requirements*.txt / requirements/*.txt found
           2. The package itself via ``uv pip install .`` if setup.py or pyproject.toml exists
-          3. Any extra requirements files declared in the recipe
+          3. Extras declared in the recipe — each is a path to a requirements
+             file inside the repo if such a file exists, otherwise a bare
+             package name (e.g. ``torch``, ``diffusers``) installed directly.
         """
         extras = extras or []
         python_bin = venv_path / "bin" / "python"
@@ -230,15 +233,27 @@ class EnvironmentManager:
         elif has_installable and skip_package_install:
             console.print("  [dim]Skipping package install (skip_package_install=true)[/dim]")
 
-        # 3. Extra requirements files declared in the recipe
+        # 3. Extras declared in the recipe: a requirements file inside the repo,
+        #    or a bare package name (e.g. "torch") installed directly.
+        packages: list[str] = []
         for extra in extras:
             extra_path = repo_path / extra
-            if extra_path.exists():
+            if extra_path.is_file():
                 console.print(f"  Installing extra deps from [cyan]{extra}[/cyan] ...")
                 _run(
                     ["uv", "pip", "install", "--python", str(python_bin), "-r", str(extra_path)],
                     extra,
                 )
+            else:
+                packages.append(extra)
+        if packages:
+            console.print(
+                f"  Installing packages: [cyan]{', '.join(packages)}[/cyan] ..."
+            )
+            _run(
+                ["uv", "pip", "install", "--python", str(python_bin), *packages],
+                "packages",
+            )
 
     @staticmethod
     def _find_all_requirements(repo_path: Path) -> list[Path]:
@@ -426,9 +441,16 @@ class ModelManager:
         Recipes can come from the public registry, so a malicious or buggy
         ``destination`` (absolute path or ``../`` segments) must never let a
         download escape the cache directory.
+
+        The check is *lexical* (``os.path.normpath``), not ``Path.resolve()``:
+        huggingface_hub stores downloaded blobs as symlinks into the shared
+        ``~/.cache/huggingface`` hub cache, so resolving symlinks would point a
+        legitimately-cached file outside ``models_dir`` and raise a false
+        positive on any second run. Collapsing ``..`` lexically still blocks
+        traversal and absolute-path escapes without following symlinks.
         """
         base = models_dir.resolve()
-        dest = (models_dir / destination).resolve()
+        dest = Path(os.path.normpath(base / destination))
         if dest != base and base not in dest.parents:
             raise ModelDownloadError(
                 f"Unsafe model destination {destination!r}: "

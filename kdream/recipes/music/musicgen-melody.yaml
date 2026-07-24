@@ -29,9 +29,9 @@ inputs:
     required: true
     description: Text description of the music to generate
   melody_audio:
-    type: file
+    type: string
     required: false
-    description: Optional reference audio file to condition the melody (wav/mp3)
+    description: Optional path to a reference audio file to condition the melody (wav/mp3)
   duration:
     type: integer
     default: 15

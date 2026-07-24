@@ -66,6 +66,22 @@ class TestValidateCommand:
         result = runner.invoke(cli, ["validate", "/nonexistent/recipe.yaml"])
         assert result.exit_code != 0
 
+    def test_validate_loads_sibling_runner_script(self, runner, sample_recipe_file):
+        """A companion run.py next to the recipe must be passed to the verifier
+        as runner_script, so HF/hybrid recipes verify locally instead of
+        falling back to a GitHub lookup that 404s."""
+        (sample_recipe_file.parent / "run.py").write_text("print('hi')\n")
+
+        passing = MagicMock(ok=True, warnings=[], errors=[])
+        with patch(
+            "kdream.core.verifier.RecipeVerifier.verify", return_value=passing
+        ) as mock_verify:
+            result = runner.invoke(cli, ["validate", str(sample_recipe_file)])
+
+        assert result.exit_code == 0
+        _, kwargs = mock_verify.call_args
+        assert kwargs.get("runner_script") == "print('hi')\n"
+
 
 class TestListCommand:
     def test_list_with_mocked_registry(self, runner):
