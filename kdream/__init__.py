@@ -18,7 +18,7 @@ from kdream.core.runner import PackageInfo, RunResult, install, list_installed, 
 from kdream.exceptions import BackendError, KdreamError, RecipeError, RegistryError
 from kdream.hub import HFModel, search_hf_models
 
-__version__ = "0.10.4"
+__version__ = "0.10.5"
 
 
 def list_recipes(
