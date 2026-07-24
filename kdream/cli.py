@@ -373,7 +373,20 @@ def validate(recipe_file, skip_verify):
 
         console.print("\n[dim]Verifying components…[/dim]")
         from kdream.core.verifier import RecipeVerifier
-        verification = RecipeVerifier().verify(recipe)
+
+        # HuggingFace/hybrid recipes ship a companion runner script next to the
+        # recipe file (e.g. run.py). Load it so the entrypoint check is satisfied
+        # by the local script instead of falling back to a GitHub-repo lookup
+        # that 404s for HF-only models.
+        runner_script = None
+        recipe_path = Path(recipe_file)
+        script_name = (recipe.entrypoint.script or "").strip()
+        if script_name and recipe_path.is_file():
+            sibling = recipe_path.parent / script_name
+            if sibling.is_file():
+                runner_script = sibling.read_text(encoding="utf-8")
+
+        verification = RecipeVerifier().verify(recipe, runner_script=runner_script)
 
         if verification.warnings:
             for w in verification.warnings:
