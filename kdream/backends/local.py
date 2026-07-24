@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
 import shutil
 import subprocess
@@ -426,9 +427,16 @@ class ModelManager:
         Recipes can come from the public registry, so a malicious or buggy
         ``destination`` (absolute path or ``../`` segments) must never let a
         download escape the cache directory.
+
+        The check is *lexical* (``os.path.normpath``), not ``Path.resolve()``:
+        huggingface_hub stores downloaded blobs as symlinks into the shared
+        ``~/.cache/huggingface`` hub cache, so resolving symlinks would point a
+        legitimately-cached file outside ``models_dir`` and raise a false
+        positive on any second run. Collapsing ``..`` lexically still blocks
+        traversal and absolute-path escapes without following symlinks.
         """
         base = models_dir.resolve()
-        dest = (models_dir / destination).resolve()
+        dest = Path(os.path.normpath(base / destination))
         if dest != base and base not in dest.parents:
             raise ModelDownloadError(
                 f"Unsafe model destination {destination!r}: "

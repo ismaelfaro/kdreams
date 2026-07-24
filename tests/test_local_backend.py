@@ -253,6 +253,24 @@ class TestDownloadDestinationSafety:
             mock_url.assert_called_once()
         assert str(result).startswith(str(tmp_path.resolve()))
 
+    def test_symlink_into_shared_cache_not_a_false_positive(self, tmp_path):
+        """A cached file that is a symlink out of the cache dir must not trip
+        the safety check. huggingface_hub stores blobs as symlinks into the
+        shared ~/.cache/huggingface hub cache, so a legit second-run download
+        resolves outside models_dir — the check must be lexical, not follow
+        symlinks."""
+        models_dir = tmp_path / "models"
+        (models_dir / "transformer").mkdir(parents=True)
+        outside = tmp_path.parent / "hf_hub_blob.safetensors"
+        outside.write_bytes(b"weights")
+        # Prior run left the destination as a symlink into the shared hub cache.
+        link = models_dir / "transformer" / "model.safetensors"
+        link.symlink_to(outside)
+
+        # Must not raise, and must stay lexically under models_dir.
+        dest = ModelManager._safe_dest(models_dir, "transformer/model.safetensors")
+        assert str(dest).startswith(str(models_dir.resolve()))
+
 
 class TestInferenceRunner:
     def test_build_command_basic(self, tmp_path, sample_yaml_recipe):
