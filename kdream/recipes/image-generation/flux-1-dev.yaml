@@ -1,0 +1,69 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: flux-1-dev
+  version: 1.0.0
+  description: State-of-the-art text-to-image generation with FLUX.1 [dev] by Black Forest Labs
+  tags: [image-generation, diffusion, text-to-image, flux]
+  license: FLUX-1-dev-Non-Commercial-License
+  author: kdream-community
+
+source:
+  repo: https://github.com/black-forest-labs/flux
+  ref: main
+  install_extras: []
+
+models:
+  - name: flux-1-dev
+    source: huggingface
+    id: black-forest-labs/FLUX.1-dev
+    destination: models/flux-1-dev
+
+entrypoint:
+  script: src/flux/cli.py
+  type: python
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the image to generate
+  width:
+    type: integer
+    default: 1360
+    min: 256
+    max: 2048
+    description: Output image width in pixels
+  height:
+    type: integer
+    default: 768
+    min: 256
+    max: 2048
+    description: Output image height in pixels
+  steps:
+    type: integer
+    default: 50
+    min: 1
+    max: 100
+    description: Number of denoising steps
+  guidance:
+    type: float
+    default: 3.5
+    min: 0.0
+    max: 10.0
+    description: Guidance scale
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: image
+    type: file
+    path: outputs/{timestamp}.png
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 16
+    tested_on: [cuda]

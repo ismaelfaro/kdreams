@@ -1,0 +1,89 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: animatediff-v3
+  version: 1.0.0
+  description: AnimateDiff v3 — animate your personalised text-to-image models into short videos using motion modules
+  tags: [video-generation, text-to-video, animation, diffusion, animatediff]
+  license: OpenRAIL++
+  author: kdream-community
+
+source:
+  repo: https://github.com/guoyww/AnimateDiff
+  ref: main
+  install_extras: []
+
+models:
+  - name: animatediff-motion-adapter-v3
+    source: huggingface
+    id: guoyww/animatediff-motion-adapter-v1-5-3
+    destination: models/animatediff-v3
+  - name: stable-diffusion-v1-5
+    source: huggingface
+    id: runwayml/stable-diffusion-v1-5
+    destination: models/sd-v1-5
+
+entrypoint:
+  script: animatediff/pipelines/pipeline_animation.py
+  type: python
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the animation to generate
+  negative_prompt:
+    type: string
+    default: "bad quality, worse quality, low resolution"
+    description: What to avoid in the generated video
+  num_frames:
+    type: integer
+    default: 16
+    min: 8
+    max: 48
+    description: Number of animation frames
+  fps:
+    type: integer
+    default: 8
+    min: 4
+    max: 24
+    description: Output video frames per second
+  width:
+    type: integer
+    default: 512
+    min: 256
+    max: 768
+    description: Video width in pixels
+  height:
+    type: integer
+    default: 512
+    min: 256
+    max: 768
+    description: Video height in pixels
+  steps:
+    type: integer
+    default: 25
+    min: 1
+    max: 50
+    description: Number of denoising steps
+  guidance_scale:
+    type: float
+    default: 7.5
+    min: 1.0
+    max: 15.0
+    description: Guidance scale
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: video
+    type: file
+    path: outputs/{timestamp}.gif
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 8
+    tested_on: [cuda]

@@ -1,0 +1,67 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: musicgen-melody
+  version: 1.0.0
+  description: MusicGen Melody by Meta — text and melody-conditioned music generation; hum or provide a reference audio to guide the output
+  tags: [music-generation, text-to-music, melody-conditioned, meta, musicgen]
+  license: CC-BY-NC-4.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/facebookresearch/audiocraft
+  ref: main
+  install_extras: []
+
+models:
+  - name: musicgen-melody
+    source: huggingface
+    id: facebook/musicgen-melody
+    destination: models/musicgen-melody
+
+entrypoint:
+  script: demos/musicgen_app.py
+  type: gradio
+
+inputs:
+  description:
+    type: string
+    required: true
+    description: Text description of the music to generate
+  melody_audio:
+    type: file
+    required: false
+    description: Optional reference audio file to condition the melody (wav/mp3)
+  duration:
+    type: integer
+    default: 15
+    min: 1
+    max: 120
+    description: Duration of generated music in seconds
+  top_k:
+    type: integer
+    default: 250
+    min: 1
+    max: 1000
+    description: Top-k sampling parameter
+  temperature:
+    type: float
+    default: 1.0
+    min: 0.1
+    max: 2.0
+    description: Sampling temperature
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: audio
+    type: file
+    path: outputs/{timestamp}.wav
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 6
+    tested_on: [cuda]

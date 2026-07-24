@@ -1,0 +1,67 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: sdxl-lightning
+  version: 1.0.0
+  description: SDXL-Lightning by ByteDance — ultra-fast few-step text-to-image generation with 1024×1024 output quality
+  tags: [image-generation, diffusion, text-to-image, sdxl, fast, bytedance]
+  license: OpenRAIL++
+  author: kdream-community
+
+source:
+  repo: https://github.com/huggingface/diffusers
+  ref: main
+  install_extras: []
+
+models:
+  - name: sdxl-lightning-4step
+    source: huggingface
+    id: ByteDance/SDXL-Lightning
+    destination: models/sdxl-lightning
+
+entrypoint:
+  script: examples/community/pipeline_stable_diffusion_xl_differential_img2img.py
+  type: python
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the image to generate
+  negative_prompt:
+    type: string
+    default: "blurry, low quality, deformed"
+    description: What to avoid in the generated image
+  width:
+    type: integer
+    default: 1024
+    min: 512
+    max: 2048
+    description: Output image width in pixels
+  height:
+    type: integer
+    default: 1024
+    min: 512
+    max: 2048
+    description: Output image height in pixels
+  steps:
+    type: integer
+    default: 4
+    min: 1
+    max: 8
+    description: Number of denoising steps
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: image
+    type: file
+    path: outputs/{timestamp}.png
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 8
+    tested_on: [cuda]

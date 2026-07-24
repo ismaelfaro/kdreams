@@ -1,0 +1,73 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: mochi-1
+  version: 1.0.0
+  description: Mochi 1 by Genmo — high-fidelity open-source text-to-video model with smooth motion and strong prompt adherence
+  tags: [video-generation, text-to-video, diffusion, mochi, genmo]
+  license: Apache-2.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/genmoai/mochi
+  ref: main
+  install_extras: []
+
+models:
+  - name: mochi-1-preview
+    source: huggingface
+    id: genmo/mochi-1-preview
+    destination: models/mochi-1
+
+entrypoint:
+  script: demos/gradio_ui.py
+  type: gradio
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the video to generate
+  negative_prompt:
+    type: string
+    default: "low quality, deformed, blurry"
+    description: What to avoid in the generated video
+  num_frames:
+    type: integer
+    default: 84
+    min: 24
+    max: 200
+    description: Number of video frames to generate
+  fps:
+    type: integer
+    default: 24
+    min: 8
+    max: 30
+    description: Output video frames per second
+  steps:
+    type: integer
+    default: 64
+    min: 10
+    max: 200
+    description: Number of denoising steps
+  guidance_scale:
+    type: float
+    default: 4.5
+    min: 1.0
+    max: 15.0
+    description: Guidance scale
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: video
+    type: file
+    path: outputs/{timestamp}.mp4
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 24
+    tested_on: [cuda]

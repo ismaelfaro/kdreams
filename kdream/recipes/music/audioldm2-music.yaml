@@ -1,0 +1,67 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: audioldm2-music
+  version: 1.0.0
+  description: AudioLDM 2 Music — specialised latent diffusion model fine-tuned for high-fidelity music generation from text prompts
+  tags: [music-generation, text-to-music, diffusion, audioldm]
+  license: Apache-2.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/haoheliu/AudioLDM2
+  ref: main
+  install_extras: []
+
+models:
+  - name: audioldm2-music
+    source: huggingface
+    id: cvssp/audioldm2-music
+    destination: models/audioldm2-music
+
+entrypoint:
+  script: audioldm2/app.py
+  type: gradio
+
+inputs:
+  text:
+    type: string
+    required: true
+    description: Text description of the music to generate (e.g. "jazz piano with soft drums, 90 BPM")
+  negative_text:
+    type: string
+    default: "low quality, noise, bad recording"
+    description: What to avoid in the generated music
+  duration:
+    type: float
+    default: 10.0
+    min: 2.5
+    max: 30.0
+    description: Duration of generated music in seconds
+  guidance_scale:
+    type: float
+    default: 3.5
+    min: 1.0
+    max: 10.0
+    description: Classifier-free guidance scale
+  ddim_steps:
+    type: integer
+    default: 200
+    min: 10
+    max: 500
+    description: Number of DDIM inference steps
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: audio
+    type: file
+    path: outputs/{timestamp}.wav
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 10
+    tested_on: [cuda]

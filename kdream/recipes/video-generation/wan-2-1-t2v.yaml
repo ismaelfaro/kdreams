@@ -1,0 +1,79 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: wan-2-1-t2v
+  version: 1.0.0
+  description: Wan 2.1 text-to-video generation — high-quality video synthesis from text prompts
+  tags: [video-generation, text-to-video, diffusion, wan]
+  license: Apache-2.0
+  author: kdream-community
+
+source:
+  repo: https://github.com/Wan-Video/Wan2.1
+  ref: main
+  install_extras: []
+
+models:
+  - name: wan-2.1-t2v-1.3b
+    source: huggingface
+    id: Wan-AI/Wan2.1-T2V-1.3B
+    destination: models/wan-t2v-1.3b
+
+entrypoint:
+  script: generate.py
+  type: python
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the video to generate
+  negative_prompt:
+    type: string
+    default: "poor quality, worst quality"
+    description: What to avoid in the generated video
+  num_frames:
+    type: integer
+    default: 81
+    min: 1
+    max: 200
+    description: Number of video frames to generate
+  fps:
+    type: integer
+    default: 16
+    min: 1
+    max: 60
+    description: Output video frames per second
+  width:
+    type: integer
+    default: 832
+    min: 256
+    max: 1280
+    description: Video width in pixels
+  height:
+    type: integer
+    default: 480
+    min: 256
+    max: 720
+    description: Video height in pixels
+  guidance_scale:
+    type: float
+    default: 5.0
+    min: 1.0
+    max: 20.0
+    description: Guidance scale
+  seed:
+    type: integer
+    default: -1
+    description: Random seed (-1 for random)
+
+outputs:
+  - name: video
+    type: file
+    path: outputs/{timestamp}.mp4
+
+backends:
+  local:
+    requires_gpu: true
+    min_vram_gb: 8
+    tested_on: [cuda]
