@@ -1,301 +1,318 @@
 #!/usr/bin/env python3
-"""Generated kdream runner for Abiray/MiniMax-H3-GGUF (MiniMax H3 FL2VA GGUF)."""
+"""kdream runner for Abiray/MiniMax-H3-GGUF — text/image-to-video+audio.
+
+Runs inference through a headless ComfyUI server (native MiniMax H3 support
+landed in ComfyUI core; GGUF components load via the ComfyUI-GGUF nodes).
+
+ComfyUI resolution order:
+    1. $COMFYUI_PATH (directory containing main.py)
+    2. ./ComfyUI, ~/ComfyUI, /opt/ComfyUI
+
+The ComfyUI server is started with the interpreter from $COMFYUI_PYTHON, the
+ComfyUI checkout's own .venv, or this interpreter (in that order).
+
+No diffusers fallback on purpose: DiffusionPipeline.from_pretrained on the
+base repo would download the ~498 GB full-precision model, which defeats the
+GGUF quantization this recipe exists for.
+"""
 import argparse
-import os
-import sys
 import json
-import subprocess
-import tempfile
+import os
 import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-import torch
-from huggingface_hub import hf_hub_download
-
-
-# ---------------------------------------------------------------------------
-# Device detection
-# ---------------------------------------------------------------------------
-_kdream_device = os.environ.get("KDREAM_DEVICE", "").strip()
-if _kdream_device in ("cuda", "mps", "cpu"):
-    device = _kdream_device
-elif torch.cuda.is_available():
-    device = "cuda"
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = "mps"
-else:
-    device = "cpu"
-
 REPO_ID = "Abiray/MiniMax-H3-GGUF"
 
+COMPONENTS = {
+    "text_encoder": ("text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf", "text_encoders"),
+    "video_vae": ("vae/minimax_h3_video_vae_fp16.safetensors", "vae"),
+    "audio_vae": ("vae/minimax_h3_audio_vae_fp32.safetensors", "vae"),
+}
+
+FPS = 24
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Model download (HF cache-aware: re-uses ~/.cache/huggingface)
 # ---------------------------------------------------------------------------
 
-def download_component(file_path: str, dest: str) -> Path:
-    """Download a single component file from HuggingFace Hub if not already present."""
-    dest_path = Path(dest)
-    if dest_path.exists():
-        print(f"[cache] {dest_path} already exists, skipping download.")
-        return dest_path
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[download] Fetching {file_path} from {REPO_ID} ...")
-    local = hf_hub_download(
-        repo_id=REPO_ID,
-        filename=file_path,
-        local_dir=str(dest_path.parent.parent),
-        local_dir_use_symlinks=False,
+def fetch_component(file_path: str) -> Path:
+    from huggingface_hub import hf_hub_download
+    print(f"[models] Ensuring {REPO_ID}/{file_path} ...", flush=True)
+    return Path(hf_hub_download(repo_id=REPO_ID, filename=file_path))
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI discovery + model wiring
+# ---------------------------------------------------------------------------
+
+def find_comfyui() -> Path | None:
+    candidates = []
+    if os.environ.get("COMFYUI_PATH"):
+        candidates.append(Path(os.environ["COMFYUI_PATH"]))
+    candidates += [Path("ComfyUI"), Path.home() / "ComfyUI", Path("/opt/ComfyUI")]
+    for c in candidates:
+        if (c / "main.py").exists():
+            return c.resolve()
+    return None
+
+
+def comfy_python(comfy_dir: Path) -> str:
+    if os.environ.get("COMFYUI_PYTHON"):
+        return os.environ["COMFYUI_PYTHON"]
+    venv_py = comfy_dir / ".venv" / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    return sys.executable
+
+
+def link_model(src: Path, comfy_dir: Path, folder: str) -> str:
+    """Symlink *src* into ComfyUI's models/<folder>/, return the filename."""
+    dest_dir = comfy_dir / "models" / folder
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    if not dest.exists():
+        dest.symlink_to(src)
+    return src.name
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI server lifecycle
+# ---------------------------------------------------------------------------
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait_for_server(port: int, proc: subprocess.Popen, timeout: float = 300) -> None:
+    start = time.time()
+    while time.time() - start < timeout:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"ComfyUI server exited early (code {proc.returncode}) — "
+                "check the server log."
+            )
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/system_stats", timeout=5,
+            )
+            return
+        except (urllib.error.URLError, OSError):
+            time.sleep(2)
+    raise RuntimeError(f"ComfyUI server did not come up within {timeout:.0f}s")
+
+
+# ---------------------------------------------------------------------------
+# Workflow
+# ---------------------------------------------------------------------------
+
+def build_workflow(args, unet_name: str, te_name: str, vvae_name: str,
+                   avae_name: str, seed: int, length: int) -> dict:
+    """API-format ComfyUI graph: t2va / fl2va via native MiniMax H3 nodes."""
+    wf = {
+        "1": {"class_type": "UnetLoaderGGUF",
+              "inputs": {"unet_name": unet_name}},
+        "2": {"class_type": "CLIPLoaderGGUF",
+              "inputs": {"clip_name": te_name, "type": "minimax"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": vvae_name}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": avae_name}},
+        "5": {"class_type": "MiniMaxH3ImageToVideo",
+              "inputs": {"clip": ["2", 0], "vae": ["3", 0],
+                         "prompt": args.prompt,
+                         "width": args.width, "height": args.height,
+                         "length": length}},
+        "6": {"class_type": "MiniMaxH3SigmaShift",
+              "inputs": {"model": ["1", 0],
+                         "shift_video": 12.0, "shift_audio": 3.0}},
+        "7": {"class_type": "ConditioningZeroOut",
+              "inputs": {"conditioning": ["5", 0]}},
+        "8": {"class_type": "KSampler",
+              "inputs": {"model": ["6", 0], "positive": ["5", 0],
+                         "negative": ["7", 0], "latent_image": ["5", 1],
+                         "seed": seed, "steps": args.steps,
+                         "cfg": args.guidance_scale,
+                         "sampler_name": "euler", "scheduler": "simple",
+                         "denoise": 1.0}},
+        "9": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+        "10": {"class_type": "VAEDecodeAudio",
+               "inputs": {"samples": ["8", 0], "vae": ["4", 0]}},
+        "11": {"class_type": "CreateVideo",
+               "inputs": {"images": ["9", 0], "audio": ["10", 0],
+                          "fps": float(FPS)}},
+        "12": {"class_type": "SaveVideo",
+               "inputs": {"video": ["11", 0],
+                          "filename_prefix": "minimax_h3",
+                          "format": "auto", "codec": "auto"}},
+    }
+    if args.first_frame_image:
+        img = Path(args.first_frame_image).resolve()
+        wf["20"] = {"class_type": "LoadImage", "inputs": {"image": str(img)}}
+        wf["5"]["inputs"]["first_frame"] = ["20", 0]
+    if args.last_frame_image:
+        img = Path(args.last_frame_image).resolve()
+        wf["21"] = {"class_type": "LoadImage", "inputs": {"image": str(img)}}
+        wf["5"]["inputs"]["last_frame"] = ["21", 0]
+    return wf
+
+
+def submit_and_wait(port: int, workflow: dict, proc: subprocess.Popen,
+                    timeout: float) -> dict:
+    payload = json.dumps(
+        {"prompt": workflow, "client_id": uuid.uuid4().hex}
+    ).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/prompt", data=payload,
+        headers={"Content-Type": "application/json"},
     )
-    local_path = Path(local)
-    if local_path.resolve() != dest_path.resolve():
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(local_path, dest_path)
-    return dest_path
-
-
-def try_comfyui_inference(args, unet_path, text_encoder_path, video_vae_path, audio_vae_path, output_path):
-    """
-    Attempt to run inference via ComfyUI if it is installed.
-    Returns True on success, False if ComfyUI is not available or fails.
-    """
-    comfyui_candidates = [
-        Path("ComfyUI/main.py"),
-        Path(os.environ.get("COMFYUI_PATH", ""), "main.py"),
-        Path("/opt/ComfyUI/main.py"),
-        Path(os.path.expanduser("~/ComfyUI/main.py")),
-    ]
-    comfyui_main = None
-    for candidate in comfyui_candidates:
-        if candidate.exists():
-            comfyui_main = candidate
-            break
-
-    if comfyui_main is None:
-        return False
-
-    comfyui_dir = comfyui_main.parent
-
-    workflow_file = Path(args.workflow)
-    if not workflow_file.exists():
-        workflow_file = comfyui_dir / args.workflow
-    if not workflow_file.exists():
-        print(f"[warning] Workflow file {args.workflow} not found; skipping ComfyUI path.")
-        return False
-
-    with open(workflow_file) as f:
-        workflow = json.load(f)
-
-    for node_id, node in workflow.items():
-        cls = node.get("class_type", "")
-        inputs = node.get("inputs", {})
-
-        if "CLIPTextEncode" in cls or "text_encode" in cls.lower():
-            if "text" in inputs:
-                inputs["text"] = args.prompt
-
-        if "UNETLoader" in cls or "gguf" in cls.lower():
-            if "unet_name" in inputs:
-                inputs["unet_name"] = str(unet_path)
-
-        if "KSampler" in cls:
-            inputs["steps"] = args.steps
-            inputs["cfg"] = args.guidance_scale
-            if args.seed != -1:
-                inputs["seed"] = args.seed
-
-        if "EmptyLatentVideo" in cls or "LatentVideo" in cls:
-            if "width" in inputs:
-                inputs["width"] = args.width
-            if "height" in inputs:
-                inputs["height"] = args.height
-            if "length" in inputs:
-                inputs["length"] = int(args.duration * 24)
-
-        if "LoadImage" in cls or "load_image" in cls.lower():
-            if args.first_frame_image and "image" in inputs:
-                inputs["image"] = str(Path(args.first_frame_image).resolve())
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
-        json.dump(workflow, tmp)
-        tmp_workflow = tmp.name
-
     try:
-        cmd = [
-            sys.executable,
-            str(comfyui_main),
-            "--workflow", tmp_workflow,
-            "--output-directory", str(output_path.parent),
-        ]
-        if device == "cpu":
-            cmd.append("--cpu")
-        print(f"[comfyui] Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=False, timeout=3600)
-        return result.returncode == 0
-    except Exception as e:
-        print(f"[comfyui] Error: {e}")
-        return False
-    finally:
-        os.unlink(tmp_workflow)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            prompt_id = json.load(resp)["prompt_id"]
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:2000]
+        raise RuntimeError(f"ComfyUI rejected the workflow: {detail}") from e
+
+    print(f"[comfyui] Queued prompt {prompt_id}; generating ...", flush=True)
+    start = time.time()
+    while time.time() - start < timeout:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"ComfyUI server died mid-generation (code {proc.returncode})."
+            )
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/history/{prompt_id}", timeout=10,
+            ) as resp:
+                history = json.load(resp)
+        except (urllib.error.URLError, OSError):
+            time.sleep(5)
+            continue
+        entry = history.get(prompt_id)
+        if entry:
+            status = entry.get("status", {})
+            if status.get("status_str") == "error":
+                msgs = [m for m in status.get("messages", [])
+                        if m and m[0] == "execution_error"]
+                detail = json.dumps(msgs[-1][1] if msgs else status)[:2000]
+                raise RuntimeError(f"ComfyUI execution failed: {detail}")
+            if entry.get("outputs"):
+                return entry["outputs"]
+        time.sleep(10)
+    raise RuntimeError(f"Generation timed out after {timeout:.0f}s")
 
 
-def run_direct_inference(args, unet_path, text_encoder_path, video_vae_path, audio_vae_path, output_path):
-    """
-    Attempt direct Python inference using diffusers or a custom MiniMax H3 pipeline.
-    Falls back to instructions if no suitable library is found.
-    """
-    # NOTE: no diffusers fallback on purpose. DiffusionPipeline.from_pretrained
-    # on the base repo would download the ~498 GB full-precision model, which
-    # defeats the GGUF quantization and cannot fit on machines this recipe
-    # targets. The GGUF components require a ComfyUI (+ ComfyUI-GGUF nodes)
-    # pipeline for inference.
-    print("[warning] No suitable video inference pipeline found for MiniMax H3 GGUF.")
-    print("[warning] MiniMax H3 GGUF is primarily designed for use with ComfyUI.")
-    print("[warning] Please install ComfyUI and the MiniMax H3 ComfyUI nodes.")
-    print("[warning] Workflows: minimax_fl2v_gguf_workflow.json / minimax_ref2va_gguf_workflow.json")
-    print("")
-    print("Model files have been downloaded to:")
-    print(f"  UNet:          {unet_path}")
-    print(f"  Text Encoder:  {text_encoder_path}")
-    print(f"  Video VAE:     {video_vae_path}")
-    print(f"  Audio VAE:     {audio_vae_path}")
-    print("")
-    print("To run inference manually with ComfyUI:")
-    print("  1. Install ComfyUI: https://github.com/comfyanonymous/ComfyUI")
-    print("  2. Install MiniMax H3 ComfyUI nodes")
-    print("  3. Place the downloaded model files in the appropriate ComfyUI model directories")
-    print("  4. Load the workflow JSON and run")
-
-    return False
+def collect_video(outputs: dict, comfy_dir: Path) -> Path:
+    for node_output in outputs.values():
+        for key in ("video", "videos", "images", "gifs"):
+            for item in node_output.get(key, []) or []:
+                fname = item.get("filename")
+                if not fname:
+                    continue
+                sub = item.get("subfolder", "")
+                p = comfy_dir / "output" / sub / fname
+                if p.exists() and p.suffix in (".mp4", ".webm", ".mov", ".mkv"):
+                    return p
+    raise RuntimeError(f"No video file found in ComfyUI outputs: {outputs}")
 
 
-def main():
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run MiniMax H3 FL2VA GGUF inference (image-to-video / text-to-video)"
+        description="MiniMax H3 GGUF video+audio generation via headless ComfyUI"
     )
-
-    parser.add_argument("--prompt", type=str, required=True,
-                        help="Text description of the video to generate")
+    parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--negative-prompt", type=str, default="",
-                        help="What to exclude from the generated video")
-    parser.add_argument("--first-frame-image", type=str, default="",
-                        help="Path to first frame image for image-to-video (optional)")
-    parser.add_argument("--last-frame-image", type=str, default="",
-                        help="Path to last frame image for first-and-last-frame mode (optional)")
-    parser.add_argument("--duration", type=float, default=5.0,
-                        help="Output video duration in seconds (4-15)")
-    parser.add_argument("--width", type=int, default=1280,
-                        help="Output video width in pixels")
-    parser.add_argument("--height", type=int, default=768,
-                        help="Output video height in pixels")
-    parser.add_argument("--steps", type=int, default=30,
-                        help="Number of diffusion sampling steps")
-    parser.add_argument("--guidance-scale", type=float, default=6.0,
-                        help="Classifier-free guidance scale")
-    parser.add_argument("--seed", type=int, default=-1,
-                        help="Random seed (-1 for random)")
-    parser.add_argument("--workflow", type=str, default="minimax_fl2v_gguf_workflow.json",
-                        help="ComfyUI workflow JSON file to use")
-    parser.add_argument("--variant", type=str, default="unet/MiniMax-H3-FL2VA-Q4_K_M.gguf",
-                        help="UNet GGUF variant filename within the repo")
-    parser.add_argument("--output-dir", type=str, default="outputs",
-                        help="Directory to save output videos")
-    parser.add_argument("--device", type=str, default="",
-                        help="Override device (cuda/mps/cpu); defaults to KDREAM_DEVICE auto-detection")
-
+                        help="(unused by the CFG-zero negative path; reserved)")
+    parser.add_argument("--first-frame-image", type=str, default="")
+    parser.add_argument("--last-frame-image", type=str, default="")
+    parser.add_argument("--duration", type=float, default=5.0)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=768)
+    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--guidance-scale", type=float, default=6.0)
+    parser.add_argument("--seed", type=int, default=-1)
+    parser.add_argument("--workflow", type=str, default="",
+                        help="(reserved) custom workflow JSON override")
+    parser.add_argument("--variant", type=str,
+                        default="unet/MiniMax-H3-FL2VA-Q4_K_M.gguf")
+    parser.add_argument("--output-dir", type=str, default="outputs")
     args = parser.parse_args()
 
-    # Device override
-    global device
-    if args.device in ("cuda", "mps", "cpu"):
-        device = args.device
+    comfy_dir = find_comfyui()
+    if comfy_dir is None:
+        print("[error] ComfyUI not found. MiniMax H3 GGUF requires ComfyUI "
+              "(native support) + the ComfyUI-GGUF custom node.")
+        print("  1. git clone https://github.com/comfyanonymous/ComfyUI")
+        print("  2. git clone https://github.com/city96/ComfyUI-GGUF "
+              "ComfyUI/custom_nodes/ComfyUI-GGUF")
+        print("  3. pip install -r ComfyUI/requirements.txt gguf")
+        print("  4. export COMFYUI_PATH=/path/to/ComfyUI and re-run")
+        return 1
+    if not (comfy_dir / "custom_nodes" / "ComfyUI-GGUF" / "nodes.py").exists():
+        print(f"[error] ComfyUI-GGUF custom node missing in {comfy_dir}/custom_nodes.")
+        print("  git clone https://github.com/city96/ComfyUI-GGUF "
+              f"{comfy_dir}/custom_nodes/ComfyUI-GGUF")
+        return 1
+    print(f"[comfyui] Using ComfyUI at {comfy_dir}", flush=True)
 
-    print(f"[info] Using device: {device}")
-    print(f"[info] UNet variant: {args.variant}")
-    print("[warning] MiniMax H3 GGUF requires ~41 GB+ RAM/VRAM. Ensure sufficient memory.")
+    # Fetch + wire models
+    unet_path = fetch_component(args.variant)
+    unet_name = link_model(unet_path, comfy_dir, "diffusion_models")
+    te_name = link_model(fetch_component(COMPONENTS["text_encoder"][0]),
+                         comfy_dir, "text_encoders")
+    vvae_name = link_model(fetch_component(COMPONENTS["video_vae"][0]),
+                           comfy_dir, "vae")
+    avae_name = link_model(fetch_component(COMPONENTS["audio_vae"][0]),
+                           comfy_dir, "vae")
 
-    if args.seed != -1:
-        torch.manual_seed(args.seed)
+    seed = args.seed if args.seed != -1 else int.from_bytes(os.urandom(4), "big")
+    length = max(5, int(args.duration * FPS))
 
-    # Validate duration
-    duration = max(4.0, min(15.0, args.duration))
-    if duration != args.duration:
-        print(f"[info] Duration clamped to {duration}s (valid range: 4-15s)")
-    args.duration = duration
+    port = free_port()
+    cmd = [comfy_python(comfy_dir), "main.py",
+           "--listen", "127.0.0.1", "--port", str(port)]
+    if os.environ.get("KDREAM_DEVICE") == "cpu":
+        cmd.append("--cpu")
+    log_path = Path(args.output_dir).resolve() / "comfyui-server.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[comfyui] Starting server on port {port} (log: {log_path})", flush=True)
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen(cmd, cwd=comfy_dir, stdout=log, stderr=log)
+        try:
+            wait_for_server(port, proc)
+            workflow = build_workflow(
+                args, unet_name, te_name, vvae_name, avae_name, seed, length,
+            )
+            timeout = float(os.environ.get("KDREAM_INFER_TIMEOUT", "7200"))
+            outputs = submit_and_wait(port, workflow, proc, timeout)
+            video = collect_video(outputs, comfy_dir)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
-    # Setup output directory
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"{timestamp}.mp4"
-
-    # ---------------------------------------------------------------------------
-    # Download all required components
-    # ---------------------------------------------------------------------------
-    print("\n[phase 1] Downloading model components ...")
-
-    # UNet (GGUF)
-    unet_dest = f"models/unet/{Path(args.variant).name}"
-    unet_path = download_component(args.variant, unet_dest)
-
-    # Text Encoder (GGUF Q4_K_M — MPS compatible)
-    text_encoder_path = download_component(
-        "text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-        "models/text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-    )
-
-    # Video VAE
-    video_vae_path = download_component(
-        "vae/minimax_h3_video_vae_fp16.safetensors",
-        "models/vae/minimax_h3_video_vae_fp16.safetensors",
-    )
-
-    # Audio VAE
-    audio_vae_path = download_component(
-        "vae/minimax_h3_audio_vae_fp32.safetensors",
-        "models/vae/minimax_h3_audio_vae_fp32.safetensors",
-    )
-
-    print("\n[phase 1] All components downloaded.")
-    print(f"  UNet:          {unet_path}  ({unet_path.stat().st_size / 1e9:.1f} GB)")
-    print(f"  Text Encoder:  {text_encoder_path}  ({text_encoder_path.stat().st_size / 1e9:.1f} GB)")
-    print(f"  Video VAE:     {video_vae_path}  ({video_vae_path.stat().st_size / 1e9:.1f} GB)")
-    print(f"  Audio VAE:     {audio_vae_path}  ({audio_vae_path.stat().st_size / 1e9:.1f} GB)")
-
-    # ---------------------------------------------------------------------------
-    # Inference
-    # ---------------------------------------------------------------------------
-    print("\n[phase 2] Running inference ...")
-    print(f"  Prompt:        {args.prompt}")
-    print(f"  Resolution:    {args.width}x{args.height}")
-    print(f"  Duration:      {args.duration}s")
-    print(f"  Steps:         {args.steps}")
-    print(f"  Guidance:      {args.guidance_scale}")
-    if args.first_frame_image:
-        print(f"  First frame:   {args.first_frame_image}")
-    if args.last_frame_image:
-        print(f"  Last frame:    {args.last_frame_image}")
-
-    # Try ComfyUI first, then direct inference
-    success = try_comfyui_inference(
-        args, unet_path, text_encoder_path, video_vae_path, audio_vae_path, output_path
-    )
-
-    if not success:
-        success = run_direct_inference(
-            args, unet_path, text_encoder_path, video_vae_path, audio_vae_path, output_path
-        )
-
-    if success and output_path.exists():
-        print(f"\n[done] Video saved to: {output_path}")
-        print(f"OUTPUT:{output_path}")
-    else:
-        print(f"\n[info] Inference did not produce output at: {output_path}")
-        print("[info] Model files are downloaded and ready for use with ComfyUI.")
-        print(f"OUTPUT:{output_path}")
+    out_dir = Path(args.output_dir).resolve()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = out_dir / f"minimax-h3-{stamp}{video.suffix}"
+    shutil.copy2(video, dest)
+    print(f"OUTPUT:{dest}", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

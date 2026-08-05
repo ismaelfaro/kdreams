@@ -128,5 +128,5 @@ outputs:
 backends:
   local:
     requires_gpu: false
-    min_vram_gb: 24
+    min_vram_gb: 22
     tested_on: [mps, cuda, cpu]

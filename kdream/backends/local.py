@@ -127,16 +127,26 @@ def total_memory_gb() -> float:
 def available_memory_gb() -> float:
     """Currently available memory in GB, 0.0 if unknown.
 
-    On macOS (no psutil) this approximates availability as
-    free + inactive + speculative pages — inactive pages are reclaimable.
+    On macOS the kernel's ``memory_pressure`` free percentage is used: it
+    accounts for reclaimable file cache and compressor pages, which the
+    naive free+inactive page count (and psutil) grossly underestimate on
+    Apple Silicon. Falls back to vm_stat pages, then psutil / meminfo.
     """
-    try:
-        import psutil  # type: ignore[import]
-        return psutil.virtual_memory().available / (1024 ** 3)
-    except ImportError:
-        pass
-    try:
-        if sys.platform == "darwin":
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["memory_pressure"], capture_output=True, text=True, timeout=10,
+            ).stdout
+            m = __import__("re").search(
+                r"free percentage:\s*(\d+)%", out,
+            )
+            if m:
+                total = total_memory_gb()
+                if total:
+                    return total * int(m.group(1)) / 100.0
+        except Exception:
+            pass
+        try:
             out = subprocess.run(
                 ["vm_stat"], capture_output=True, text=True, timeout=5,
             ).stdout
@@ -150,6 +160,14 @@ def available_memory_gb() -> float:
                 if km:
                     pages += int(km.group(1))
             return pages * page_size / (1024 ** 3)
+        except Exception:
+            return 0.0
+    try:
+        import psutil  # type: ignore[import]
+        return psutil.virtual_memory().available / (1024 ** 3)
+    except ImportError:
+        pass
+    try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemAvailable:"):
                 return int(line.split()[1]) / (1024 ** 2)
@@ -250,6 +268,11 @@ class EnvironmentManager:
         if dest.exists() and (dest / ".git").exists():
             console.print(f"  [dim]Repo already cloned at {dest}[/dim]")
             return
+
+        if dest.exists():
+            # Leftover from an interrupted install (no .git) — clear and re-clone.
+            console.print(f"  [dim]Removing incomplete clone at {dest}[/dim]")
+            shutil.rmtree(dest)
 
         console.print(f"  Cloning [cyan]{repo_url}[/cyan] @ {ref} ...")
         # Never smudge LFS files during clone: model repos (HuggingFace in
@@ -842,6 +865,20 @@ class LocalBackend(AbstractBackend):
         # 1. Clone repo
         console.print("\n[bold][1/4][/bold] Cloning repo")
         self.env_manager.clone_repo(recipe.source.repo, recipe.source.ref, repo_path)
+
+        # Persist the resolved recipe inside the package so run() can reload
+        # it even when the source repo carries no kdream-recipe.yaml (e.g.
+        # HuggingFace model repos and local recipe files not in the registry).
+        recipe_copy = repo_path / "kdream-recipe.yaml"
+        if not recipe_copy.exists():
+            try:
+                import yaml as _yaml
+                recipe_copy.write_text(
+                    _yaml.safe_dump(recipe.model_dump(mode="json"), sort_keys=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                console.print(f"  [dim]Could not persist recipe copy: {exc}[/dim]")
 
         # 2. Create venv
         console.print("\n[bold][2/4][/bold] Creating virtual environment")
