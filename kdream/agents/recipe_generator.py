@@ -485,6 +485,12 @@ def search_hf_quantized_derivatives(
         need = smallest_gb if d["format"] == "gguf" else total_gb
         d["fits"] = bool(need) and ram_gb > 0 and need <= ram_gb * 0.8
 
+    # Final order: options that FIT this machine first, then merely
+    # compatible ones, then the rest — each group by downloads.
+    scored.sort(key=lambda d: (
+        not d.get("fits", False), not d["compatible"], -d["downloads"],
+    ))
+
     console.print(
         f"\n[bold]Quantized derivatives of {model_id}[/bold] "
         f"[dim](base_model:quantized relation — accelerator: "
@@ -725,21 +731,39 @@ def _prompt_variant_selection(
         # Fall through and show all variants anyway
         compatible = [(i, v) for i, v in enumerate(variants)]
 
-    # Build the selection table
+    # Build the selection table. Order: variants that FIT this machine's
+    # memory first (largest = best quality first), then compatible variants
+    # that don't fit (smallest first — closest to fitting), then incompatible.
+    # A single component file gets 60% of RAM — the rest is reserved for the
+    # other pipeline components (text encoder, VAE), activations, and the OS.
+    ram_budget_bytes = _total_system_memory_gb() * 0.6 * (1024 ** 3)
+
+    def _fits(v: dict) -> bool:
+        size = v.get("size_bytes", 0) or 0
+        return bool(size) and ram_budget_bytes > 0 and size <= ram_budget_bytes
+
+    def _order_key(entry: tuple[int, dict]) -> tuple:
+        _, v = entry
+        supported = _FORMAT_HARDWARE_COMPAT.get(v["format"], set())
+        compat = accelerator in supported
+        fits = _fits(v)
+        size = v.get("size_bytes", 0) or 0
+        # fitting: bigger is better; not fitting: smaller is closer to usable
+        return (not fits, not compat, -size if fits else size)
+
+    display_order: list[tuple[int, dict[str, str]]] = sorted(
+        [(i, v) for i, v in compatible] + [(i, v) for i, v in incompatible],
+        key=_order_key,
+    )
+
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("#", style="dim", width=4)
     table.add_column("Variant")
     table.add_column("Format")
     table.add_column("Size", justify="right")
     table.add_column("Compat", width=8)
+    table.add_column("Fits", width=6)
     table.add_column("File")
-
-    # Show compatible variants first
-    display_order: list[tuple[int, dict[str, str]]] = []
-    for orig_idx, v in compatible:
-        display_order.append((orig_idx, v))
-    for orig_idx, v in incompatible:
-        display_order.append((orig_idx, v))
 
     for display_num, (_, v) in enumerate(display_order, 1):
         supported = _FORMAT_HARDWARE_COMPAT.get(v["format"], set())
@@ -747,15 +771,17 @@ def _prompt_variant_selection(
             compat_str = "[green]Yes[/green]"
         else:
             compat_str = "[red]No[/red]"
+        fits_str = "[green]Yes[/green]" if _fits(v) else "[red]No[/red]"
         size_bytes = v.get("size_bytes", 0)
         if size_bytes > 0:
             size_gb = size_bytes / (1024 ** 3)
             size_str = f"{size_gb:.1f} GB"
         else:
             size_str = "—"
+            fits_str = "—"
         table.add_row(
             str(display_num), v["quant_label"], v["format"].upper(),
-            size_str, compat_str, v["filename"],
+            size_str, compat_str, fits_str, v["filename"],
         )
 
     console.print(table)
@@ -773,19 +799,9 @@ def _prompt_variant_selection(
             default=1,
         )
     else:
-        # Auto-pick: the largest compatible variant that fits in memory
-        # (best quality that can actually run), else the first compatible.
-        ram_budget = _total_system_memory_gb() * 0.8 * (1024 ** 3)
-        choice = 1  # display_order is compatible-first; fallback default
-        best_size = -1
-        for display_num, (_, v) in enumerate(display_order, 1):
-            supported = _FORMAT_HARDWARE_COMPAT.get(v["format"], set())
-            size = v.get("size_bytes", 0) or 0
-            if accelerator not in supported:
-                continue
-            if ram_budget > 0 and size and size <= ram_budget and size > best_size:
-                best_size = size
-                choice = display_num
+        # display_order is best-first: fits-largest, then compatible, then
+        # incompatible — so the first entry is the best runnable choice.
+        choice = 1
     selected_orig_idx, selected = display_order[choice - 1]
 
     # Warn if user picked an incompatible variant

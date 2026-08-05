@@ -497,3 +497,67 @@ class TestQuantizedDerivatives:
         with patch("huggingface_hub.HfApi", MagicMock(return_value=api)):
             assert rg.search_hf_quantized_derivatives("org/model",
                                                       interactive=False) is None
+
+
+class TestVariantOrderingFitsFirst:
+    """Quantized options are presented best-fit-for-this-machine first."""
+
+    def _variants(self):
+        gib = 1024 ** 3
+        return [
+            {"filename": "m-Q5_K_M.gguf", "quant_label": "Q5_K_M",
+             "format": "gguf", "size_bytes": 26 * gib},   # too big for budget
+            {"filename": "m-Q3_K_S.gguf", "quant_label": "Q3_K_S",
+             "format": "gguf", "size_bytes": 8 * gib},
+            {"filename": "m-Q4_K_M.gguf", "quant_label": "Q4_K_M",
+             "format": "gguf", "size_bytes": 12 * gib},
+            {"filename": "m-AWQ.awq", "quant_label": "AWQ",
+             "format": "awq", "size_bytes": 6 * gib},     # incompatible on mps
+        ]
+
+    def test_auto_pick_largest_fitting_variant(self):
+        import kdream.agents.recipe_generator as rg
+
+        # 32 GB machine → 60% budget = 19.2 GB: Q5 (26) out, Q4 (12) best
+        with patch.object(rg, "_detect_accelerator", return_value="mps"), \
+             patch.object(rg, "_total_system_memory_gb", return_value=32.0):
+            sel = rg._prompt_variant_selection(
+                self._variants(), "org/model", interactive=False,
+            )
+        assert sel["filename"] == "m-Q4_K_M.gguf"
+
+    def test_oversized_and_incompatible_sort_last(self):
+        import kdream.agents.recipe_generator as rg
+
+        with patch.object(rg, "_detect_accelerator", return_value="mps"), \
+             patch.object(rg, "_total_system_memory_gb", return_value=32.0), \
+             patch.object(rg.IntPrompt, "ask", return_value=1) as ask:
+            rg._prompt_variant_selection(
+                self._variants(), "org/model", interactive=True,
+            )
+        # Interactive default is #1 — the largest fitting variant
+        assert ask.call_args.kwargs.get("default") == 1
+
+    def test_derivative_repos_sorted_fits_first(self):
+        candidates = [
+            MagicMock(id="a/M-GGUF-huge", tags=["gguf"], downloads=999_999),
+            MagicMock(id="b/M-GGUF-small", tags=["gguf"], downloads=10),
+        ]
+        import kdream.agents.recipe_generator as rg
+        api = MagicMock()
+        api.list_models.return_value = candidates
+
+        def _weights(mid):
+            # huge repo's smallest file doesn't fit; small repo fits
+            return (300.0, 40.0) if "huge" in mid else (30.0, 8.0)
+
+        with patch("huggingface_hub.HfApi", MagicMock(return_value=api)), \
+             patch.object(rg, "_detect_accelerator", return_value="mps"), \
+             patch.object(rg, "_total_system_memory_gb", return_value=32.0), \
+             patch.object(rg, "_derivative_weight_gb", side_effect=_weights), \
+             patch.object(rg, "get_hf_model_info",
+                          side_effect=lambda mid: {"model_id": mid}):
+            result = rg.search_hf_quantized_derivatives("org/base",
+                                                        interactive=False)
+        # Auto-pick must be the FITTING repo despite far fewer downloads
+        assert result["model_id"] == "b/M-GGUF-small"
