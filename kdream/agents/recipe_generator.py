@@ -372,6 +372,181 @@ def search_hf_quantized_alternatives(
 
 
 # ---------------------------------------------------------------------------
+# Quantized derivative discovery (HF base_model:quantized:<id> relation)
+# ---------------------------------------------------------------------------
+
+# Formats runnable per accelerator. mlx is Apple-only; fp8/nvfp4/awq/gptq
+# need NVIDIA hardware; gguf runs everywhere via llama-cpp/stable-diffusion-cpp.
+_DERIVATIVE_FORMAT_COMPAT: dict[str, set[str]] = {
+    "gguf": {"cuda", "mps", "cpu"},
+    "mlx": {"mps"},
+    "awq": {"cuda"},
+    "gptq": {"cuda"},
+    "fp8": {"cuda"},
+    "nvfp4": {"cuda"},
+    "int4": {"cuda"},
+    "nf4": {"cuda"},
+}
+
+
+def _derivative_format(model: Any) -> str:
+    """Guess the quantization format of a derivative repo from tags + id."""
+    mid = (model.id if hasattr(model, "id") else str(model)).lower()
+    tags = {t.lower() for t in (getattr(model, "tags", None) or [])}
+    for fmt in ("gguf", "mlx", "awq", "gptq"):
+        if fmt in tags or fmt in mid:
+            return fmt
+    if "fp8" in mid or "fp8" in tags:
+        return "fp8"
+    if "nvfp4" in mid:
+        return "nvfp4"
+    if "nf4" in mid:
+        return "nf4"
+    if "int4" in mid or "4-bit" in tags or "w4a16" in mid:
+        return "int4"
+    return "unknown"
+
+
+def _derivative_weight_gb(model_id: str) -> tuple[float, float]:
+    """Return (total_weight_gb, smallest_single_weight_gb) for a HF repo.
+
+    Uses file metadata so callers can judge whether the quantized model fits
+    this machine. Returns (0.0, 0.0) when metadata is unavailable.
+    """
+    try:
+        from huggingface_hub import HfApi  # type: ignore[import]
+        info = HfApi().model_info(model_id, files_metadata=True)
+    except Exception:
+        return 0.0, 0.0
+    total = 0
+    smallest = 0
+    for sib in getattr(info, "siblings", None) or []:
+        size = getattr(sib, "size", None) or 0
+        if not size or not sib.rfilename.lower().endswith(_WEIGHT_EXTENSIONS):
+            continue
+        total += size
+        if smallest == 0 or size < smallest:
+            smallest = size
+    return total / (1024 ** 3), smallest / (1024 ** 3)
+
+
+def search_hf_quantized_derivatives(
+    model_id: str, interactive: bool = True,
+) -> dict[str, Any] | None:
+    """Find quantized derivatives of *model_id* via HF's structured
+    ``base_model:quantized:<id>`` relation (the web UI's
+    ``huggingface.co/models?other=base_model:quantized:<id>`` filter) and let
+    the user (or an auto-picker) choose one that can run on this machine.
+
+    Returns the derivative's full HF info dict (``get_hf_model_info``) or
+    None to continue with the original full-precision model.
+    """
+    try:
+        from huggingface_hub import HfApi  # type: ignore[import]
+        api = HfApi()
+        candidates = list(api.list_models(
+            filter=f"base_model:quantized:{model_id}",
+            sort="downloads",
+            limit=20,
+        ))
+    except Exception as exc:
+        console.print(f"  [dim]Quantized-derivative search failed: {exc}[/dim]")
+        return None
+
+    if not candidates:
+        console.print("  [dim]No quantized derivatives found on the Hub.[/dim]")
+        return None
+
+    accelerator = _detect_accelerator()
+    ram_gb = _total_system_memory_gb()
+
+    scored: list[dict[str, Any]] = []
+    for c in candidates:
+        fmt = _derivative_format(c)
+        compat = accelerator in _DERIVATIVE_FORMAT_COMPAT.get(fmt, set())
+        scored.append({
+            "id": c.id,
+            "format": fmt,
+            "downloads": getattr(c, "downloads", 0) or 0,
+            "compatible": compat,
+        })
+    # Compatible formats first, then by downloads
+    scored.sort(key=lambda d: (not d["compatible"], -d["downloads"]))
+
+    # Fetch sizes for the top candidates only (one API call each)
+    for d in scored[:8]:
+        total_gb, smallest_gb = _derivative_weight_gb(d["id"])
+        d["total_gb"] = total_gb
+        d["smallest_gb"] = smallest_gb
+        # A repo "fits" when its smallest weight variant leaves headroom.
+        # For sharded (multi-file) repos the smallest single file understates
+        # the requirement, so also require the total to be plausible for
+        # non-gguf formats.
+        need = smallest_gb if d["format"] == "gguf" else total_gb
+        d["fits"] = bool(need) and ram_gb > 0 and need <= ram_gb * 0.8
+
+    console.print(
+        f"\n[bold]Quantized derivatives of {model_id}[/bold] "
+        f"[dim](base_model:quantized relation — accelerator: "
+        f"{accelerator.upper()}, RAM {ram_gb:.0f} GB)[/dim]"
+    )
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Model ID")
+    table.add_column("Format")
+    table.add_column("Downloads", justify="right")
+    table.add_column("Weights", justify="right")
+    table.add_column("Fits", width=6)
+
+    shown = scored[:8]
+    for i, d in enumerate(shown, 1):
+        size_str = (
+            f"{d.get('total_gb', 0):.1f} GB"
+            + (f" (min {d['smallest_gb']:.1f})" if d.get("smallest_gb") else "")
+            if d.get("total_gb") else "—"
+        )
+        fits_str = (
+            "[green]Yes[/green]" if d.get("fits")
+            else ("[red]No[/red]" if d["compatible"] else "[red]—[/red]")
+        )
+        model_label = d["id"] if d["compatible"] else f"[dim]{d['id']}[/dim]"
+        table.add_row(str(i), model_label, d["format"].upper(),
+                      str(d["downloads"]), size_str, fits_str)
+    skip_idx = len(shown) + 1
+    table.add_row(str(skip_idx), "[dim]Skip — use the original model[/dim]",
+                  "", "", "", "")
+    console.print(table)
+
+    if interactive:
+        choice = IntPrompt.ask(
+            "\n[bold]Select a quantized derivative (or skip)[/bold]",
+            choices=[str(i) for i in range(1, skip_idx + 1)],
+            default=1 if shown and shown[0]["compatible"] else skip_idx,
+        )
+        if choice == skip_idx:
+            console.print("  [dim]Continuing with the original model.[/dim]")
+            return None
+        selected = shown[choice - 1]
+    else:
+        # Auto-pick: best-downloaded compatible derivative that fits memory,
+        # else best compatible one, else keep the original model.
+        fitting = [d for d in shown if d["compatible"] and d.get("fits")]
+        compatible = [d for d in shown if d["compatible"]]
+        selected = (fitting or compatible or [None])[0]
+        if selected is None:
+            console.print(
+                "  [dim]No compatible quantized derivative — keeping the "
+                "original model.[/dim]"
+            )
+            return None
+        console.print(f"  [green]Auto-selected:[/green] {selected['id']}")
+
+    info = get_hf_model_info(selected["id"])
+    info["quantized_from"] = model_id
+    return info
+
+
+# ---------------------------------------------------------------------------
 # Quantized variant detection
 # ---------------------------------------------------------------------------
 
@@ -598,7 +773,19 @@ def _prompt_variant_selection(
             default=1,
         )
     else:
-        choice = 1  # display_order is compatible-first; pick the best default
+        # Auto-pick: the largest compatible variant that fits in memory
+        # (best quality that can actually run), else the first compatible.
+        ram_budget = _total_system_memory_gb() * 0.8 * (1024 ** 3)
+        choice = 1  # display_order is compatible-first; fallback default
+        best_size = -1
+        for display_num, (_, v) in enumerate(display_order, 1):
+            supported = _FORMAT_HARDWARE_COMPAT.get(v["format"], set())
+            size = v.get("size_bytes", 0) or 0
+            if accelerator not in supported:
+                continue
+            if ram_budget > 0 and size and size <= ram_budget and size > best_size:
+                best_size = size
+                choice = display_num
     selected_orig_idx, selected = display_order[choice - 1]
 
     # Warn if user picked an incompatible variant
@@ -702,10 +889,17 @@ def _build_hf_base_msg(
             f"quantization: {selected_variant['quant_label']}, "
             f"{compat_note})\n"
         )
+    quantized_from_line = ""
+    if hf_info.get("quantized_from"):
+        quantized_from_line = (
+            f"Quantized derivative of: {hf_info['quantized_from']} "
+            f"(https://huggingface.co/{hf_info['quantized_from']})\n"
+        )
     return (
         f"SOURCE_TYPE: huggingface\n"
         f"Model ID: {hf_info['model_id']}\n"
         f"URL: {hf_info['url']}\n"
+        f"{quantized_from_line}"
         f"Accelerator: {accelerator}\n"
         f"{github_line}"
         f"{variant_line}"
@@ -1122,6 +1316,13 @@ class RecipeGeneratorAgent:
         if _is_hf:
             model_id = hf_model_id_from_url(repo)
             hf_info = get_hf_model_info(model_id)
+
+            # Surface quantized derivatives (base_model:quantized:<id>) so the
+            # recipe targets a model that can actually run on this machine.
+            derivative = search_hf_quantized_derivatives(model_id, interactive)
+            if derivative is not None:
+                hf_info = derivative
+                model_id = hf_info["model_id"]
 
             # Prompt user to select a quantized variant if available
             variants = hf_info.get("quantized_variants", [])

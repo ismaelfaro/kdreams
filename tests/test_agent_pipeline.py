@@ -421,3 +421,79 @@ class TestResourceEstimate:
     def test_resource_context_empty_without_weights(self):
         from kdream.agents.recipe_generator import _build_resource_context
         assert _build_resource_context({"file_sizes": {}}) == ""
+
+
+class TestQuantizedDerivatives:
+    """Discovery of quantized derivatives via base_model:quantized:<id>."""
+
+    def _model(self, mid, tags=(), downloads=0):
+        m = MagicMock()
+        m.id = mid
+        m.tags = list(tags)
+        m.downloads = downloads
+        return m
+
+    def test_derivative_format_detection(self):
+        from kdream.agents.recipe_generator import _derivative_format
+        assert _derivative_format(self._model("org/M-GGUF", ["gguf"])) == "gguf"
+        assert _derivative_format(self._model("org/M-MLX-4bit", ["mlx"])) == "mlx"
+        assert _derivative_format(self._model("org/M-nvfp4")) == "nvfp4"
+        assert _derivative_format(self._model("org/M-AWQ", ["awq"])) == "awq"
+        assert _derivative_format(self._model("org/M-fp8-e4m3fn")) == "fp8"
+        assert _derivative_format(self._model("org/M-W4A16-RTN")) == "int4"
+        assert _derivative_format(self._model("org/M-plain")) == "unknown"
+
+    def _run_search(self, candidates, interactive=False, accelerator="mps",
+                    ram=32.0, weight_gb=(8.0, 4.0)):
+        import kdream.agents.recipe_generator as rg
+        api = MagicMock()
+        api.list_models.return_value = candidates
+        hf_api_cls = MagicMock(return_value=api)
+        with patch.dict("sys.modules", {}), \
+             patch("huggingface_hub.HfApi", hf_api_cls), \
+             patch.object(rg, "_detect_accelerator", return_value=accelerator), \
+             patch.object(rg, "_total_system_memory_gb", return_value=ram), \
+             patch.object(rg, "_derivative_weight_gb", return_value=weight_gb), \
+             patch.object(rg, "get_hf_model_info",
+                          side_effect=lambda mid: {"model_id": mid}) as get_info:
+            result = rg.search_hf_quantized_derivatives(
+                "MiniMaxAI/MiniMax-H3", interactive=interactive,
+            )
+        api.list_models.assert_called_once_with(
+            filter="base_model:quantized:MiniMaxAI/MiniMax-H3",
+            sort="downloads", limit=20,
+        )
+        return result, get_info
+
+    def test_auto_picks_compatible_fitting_derivative(self):
+        candidates = [
+            self._model("a/M-nvfp4", downloads=50_000),        # cuda-only
+            self._model("b/M-GGUF", ["gguf"], downloads=80_000),  # mps ok
+            self._model("c/M-AWQ", ["awq"], downloads=90_000),    # cuda-only
+        ]
+        result, _ = self._run_search(candidates, accelerator="mps")
+        assert result is not None
+        assert result["model_id"] == "b/M-GGUF"
+        assert result["quantized_from"] == "MiniMaxAI/MiniMax-H3"
+
+    def test_no_compatible_derivative_returns_none(self):
+        candidates = [
+            self._model("a/M-nvfp4", downloads=50_000),
+            self._model("c/M-AWQ", ["awq"], downloads=90_000),
+        ]
+        result, get_info = self._run_search(candidates, accelerator="mps")
+        assert result is None
+        get_info.assert_not_called()
+
+    def test_no_candidates_returns_none(self):
+        result, get_info = self._run_search([])
+        assert result is None
+        get_info.assert_not_called()
+
+    def test_search_failure_returns_none(self):
+        import kdream.agents.recipe_generator as rg
+        api = MagicMock()
+        api.list_models.side_effect = RuntimeError("network down")
+        with patch("huggingface_hub.HfApi", MagicMock(return_value=api)):
+            assert rg.search_hf_quantized_derivatives("org/model",
+                                                      interactive=False) is None
