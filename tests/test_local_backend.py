@@ -384,3 +384,70 @@ class TestLocalBackend:
         backend = LocalBackend.__new__(LocalBackend)
         errors = backend.validate_inputs(recipe, {})
         assert any("prompt" in e for e in errors)
+
+
+class TestMemoryGate:
+    """Memory gate: fail fast on impossible requirements, wait when possible."""
+
+    def _gate(self, device="mps", vram_gb=0):
+        from unittest.mock import MagicMock
+
+        from kdream.backends.local import MemoryGate
+        hw = MagicMock()
+        hw.detect.return_value = {"device": device, "vram_gb": vram_gb,
+                                  "cuda_version": None}
+        return MemoryGate(hw)
+
+    def test_zero_requirement_is_noop(self):
+        self._gate().ensure(0)  # must not raise or wait
+
+    def test_impossible_requirement_fails_immediately(self, monkeypatch):
+        from kdream.backends.local import BackendError
+        monkeypatch.setattr("kdream.backends.local.total_memory_gb", lambda: 32.0)
+        gate = self._gate()
+        with pytest.raises(BackendError, match="cannot run here"):
+            gate.ensure(150)
+
+    def test_cuda_checks_vram(self):
+        from kdream.backends.local import BackendError
+        gate = self._gate(device="cuda", vram_gb=8)
+        with pytest.raises(BackendError, match="GPU has 8 GB"):
+            gate.ensure(24)
+        gate.ensure(6)  # fits → no raise
+
+    def test_waits_until_memory_free(self, monkeypatch):
+        monkeypatch.setattr("kdream.backends.local.total_memory_gb", lambda: 32.0)
+        avail = iter([4.0, 4.0, 20.0])
+        monkeypatch.setattr("kdream.backends.local.available_memory_gb",
+                            lambda: next(avail))
+        sleeps: list[float] = []
+        monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+        gate = self._gate()
+        gate.POLL_INTERVAL_S = 0.01
+        gate.ensure(16)  # returns once 20 GB free
+        assert len(sleeps) == 2
+
+    def test_wait_timeout_raises(self, monkeypatch):
+        from kdream.backends.local import BackendError
+        monkeypatch.setattr("kdream.backends.local.total_memory_gb", lambda: 32.0)
+        monkeypatch.setattr("kdream.backends.local.available_memory_gb", lambda: 4.0)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        monkeypatch.setenv("KDREAM_MEMORY_WAIT_TIMEOUT", "0")
+        gate = self._gate()
+        with pytest.raises(BackendError, match="Timed out"):
+            gate.ensure(16)
+
+    def test_skip_env_bypasses_gate(self, monkeypatch):
+        monkeypatch.setenv("KDREAM_SKIP_MEMORY_CHECK", "1")
+        monkeypatch.setattr("kdream.backends.local.total_memory_gb", lambda: 32.0)
+        self._gate().ensure(500)  # must not raise
+
+    def test_unknown_availability_does_not_block(self, monkeypatch):
+        monkeypatch.setattr("kdream.backends.local.total_memory_gb", lambda: 32.0)
+        monkeypatch.setattr("kdream.backends.local.available_memory_gb", lambda: 0.0)
+        self._gate().ensure(16)  # unknown availability → proceed
+
+    def test_memory_helpers_return_floats(self):
+        from kdream.backends.local import available_memory_gb, total_memory_gb
+        assert total_memory_gb() > 0     # real machine has RAM
+        assert available_memory_gb() >= 0

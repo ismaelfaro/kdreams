@@ -715,6 +715,7 @@ def _build_hf_base_msg(
         f"License: {hf_info['license']}\n"
         f"Downloads: {hf_info['downloads']}\n\n"
         f"## Model Card\n{hf_info['model_card'] or '(unavailable)'}\n\n"
+        f"{_build_resource_context(hf_info)}\n"
         f"## Files in Repository (with sizes)\n"
         f"{_format_file_listing(hf_info['files'].split(chr(10)) if hf_info['files'] else [], hf_info.get('file_sizes', {}))}"
     )
@@ -785,6 +786,126 @@ def _extract_python(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive generation — self-correcting parse / validate / verify loops
+# ---------------------------------------------------------------------------
+
+MAX_RECIPE_ATTEMPTS = 3   # initial write + repairs for YAML parse/validation
+MAX_SCRIPT_ATTEMPTS = 3   # initial write + repairs for the runner script
+MAX_VERIFY_ROUNDS = 2     # repair rounds driven by component verification
+
+_WEIGHT_EXTENSIONS = (
+    ".safetensors", ".gguf", ".bin", ".pt", ".pth", ".onnx", ".ckpt", ".awq",
+)
+
+
+def _estimate_weight_size_gb(file_sizes: dict[str, int]) -> float:
+    """Sum the size of all model-weight files in a HF repo, in GB."""
+    total = 0
+    for fname, size in (file_sizes or {}).items():
+        if fname.lower().endswith(_WEIGHT_EXTENSIONS):
+            total += size or 0
+    return total / (1024 ** 3)
+
+
+def _total_system_memory_gb() -> float:
+    """Total physical memory of this machine in GB (0.0 if undetectable)."""
+    try:
+        import psutil  # type: ignore[import]
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        pass
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return int(out.stdout.strip()) / (1024 ** 3)
+        meminfo = Path("/proc/meminfo").read_text()
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) / (1024 ** 2)  # kB → GB
+    except Exception:
+        pass
+    return 0.0
+
+
+def _build_resource_context(hf_info: dict[str, Any]) -> str:
+    """Describe model weight size vs. machine memory so agents can set
+    realistic memory requirements and warn when a model cannot run locally."""
+    weights_gb = _estimate_weight_size_gb(hf_info.get("file_sizes") or {})
+    ram_gb = _total_system_memory_gb()
+    if weights_gb <= 0:
+        return ""
+    lines = [
+        "## Resource Estimate",
+        f"Total model weight files in the repository: {weights_gb:.1f} GB",
+    ]
+    if ram_gb:
+        lines.append(f"This machine's total memory (RAM/unified): {ram_gb:.1f} GB")
+        if weights_gb > ram_gb:
+            lines.append(
+                "WARNING: the full-precision weights exceed this machine's memory. "
+                "Set backends.local.min_vram_gb to the realistic memory needed to "
+                "load the components required for ONE inference run (not the whole "
+                "repository if it contains multiple variants), and state the "
+                "hardware requirement clearly in the recipe description."
+            )
+    lines.append(
+        "Use the per-file sizes in the file listing to compute the minimum "
+        "resident memory (e.g. transformer + text encoder + VAE for one variant) "
+        "and record it in backends.local.min_vram_gb."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _try_parse_recipe(yaml_content: str) -> tuple[Any | None, list[str]]:
+    """Parse + sanitize + validate a recipe YAML string.
+
+    Returns ``(recipe, errors)``. ``recipe`` is None when the YAML cannot be
+    parsed into the schema at all; otherwise ``errors`` holds repairable
+    validation findings (empty list = fully valid).
+    """
+    from kdream.core.recipe import parse_yaml_recipe, validate_recipe
+
+    import yaml as _yaml
+    try:
+        raw = _yaml.safe_load(yaml_content)
+    except Exception as exc:
+        return None, [f"YAML parse error: {exc}"]
+    if not isinstance(raw, dict):
+        return None, ["Recipe must be a YAML mapping at the top level."]
+    raw = _sanitize_recipe_data(raw)
+    try:
+        recipe = parse_yaml_recipe(_yaml.dump(raw, allow_unicode=True))
+    except Exception as exc:
+        return None, [f"Recipe schema error: {exc}"]
+    return recipe, [str(e) for e in validate_recipe(recipe)]
+
+
+def _check_runner_script(script: str) -> list[str]:
+    """Static checks on a generated runner script. Returns repairable errors."""
+    errors: list[str] = []
+    if not script.strip():
+        return ["The script is empty — return a complete Python script."]
+    try:
+        compile(script, "run.py", "exec")
+    except SyntaxError as exc:
+        errors.append(f"Python syntax error at line {exc.lineno}: {exc.msg}")
+    if not any(ind in script for ind in ("argparse", "click", "sys.argv", "typer")):
+        errors.append(
+            "The script must accept CLI arguments (use argparse) matching the "
+            "recipe inputs."
+        )
+    if "OUTPUT:" not in script:
+        errors.append(
+            "The script must print each output path to stdout as 'OUTPUT:<path>'."
+        )
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Agent pipeline
 # ---------------------------------------------------------------------------
 
@@ -795,6 +916,123 @@ class RecipeGeneratorAgent:
     def __init__(self, api_key: str | None = None):
         import anthropic  # type: ignore[import]
         self.client = anthropic.Anthropic(api_key=api_key)
+
+    # ------------------------------------------------------------------
+    # Self-correcting generation loops
+    # ------------------------------------------------------------------
+
+    def _repair_recipe(
+        self, writer_prompt: str, previous_yaml: str, errors: list[str],
+    ) -> str:
+        """Ask the RecipeWriter agent to fix its previous output."""
+        msg = (
+            writer_prompt
+            + "\n\n## Previous Attempt (INVALID — must be fixed)\n"
+            + "```yaml\n" + previous_yaml + "\n```\n"
+            + "\n## Errors To Fix\n"
+            + "\n".join(f"- {e}" for e in errors)
+            + "\n\nReturn the COMPLETE corrected YAML recipe (not a diff). "
+            "Fix every error above and keep everything that was already correct."
+        )
+        return call_agent("recipe-writer", msg, self.client)
+
+    def _generate_recipe_with_repair(
+        self, writer_prompt: str,
+    ) -> tuple[str, Any]:
+        """Generate a recipe YAML, feeding parse/validation errors back to the
+        RecipeWriter agent until it is valid (or attempts are exhausted).
+
+        Returns ``(yaml_content, recipe)``. Raises :class:`RecipeError` only
+        when no attempt produced a schema-parseable recipe at all.
+        """
+        from kdream.exceptions import RecipeError
+
+        yaml_content = ""
+        errors: list[str] = []
+        best: tuple[str, Any, list[str]] | None = None
+
+        for attempt in range(1, MAX_RECIPE_ATTEMPTS + 1):
+            if attempt == 1:
+                raw = call_agent("recipe-writer", writer_prompt, self.client)
+            else:
+                console.print(
+                    f"  [yellow]Recipe invalid — repair attempt "
+                    f"{attempt - 1}/{MAX_RECIPE_ATTEMPTS - 1}[/yellow]"
+                )
+                for e in errors[:6]:
+                    console.print(f"    [dim]{e}[/dim]")
+                raw = self._repair_recipe(writer_prompt, yaml_content, errors)
+
+            yaml_content = _extract_yaml(raw)
+            recipe, errors = _try_parse_recipe(yaml_content)
+            if recipe is not None and not errors:
+                return yaml_content, recipe
+            if recipe is not None:
+                best = (yaml_content, recipe, errors)
+
+        if best is not None:
+            yaml_content, recipe, errors = best
+            console.print(
+                f"[yellow]Validation warnings remain after "
+                f"{MAX_RECIPE_ATTEMPTS} attempts ({len(errors)}):[/yellow]"
+            )
+            for err in errors:
+                console.print(f"  • {err}")
+            return yaml_content, recipe
+
+        console.print("[dim]Last raw output:[/dim]\n" + yaml_content)
+        raise RecipeError(
+            f"Could not generate a parseable recipe after "
+            f"{MAX_RECIPE_ATTEMPTS} attempts. Last errors:\n"
+            + "\n".join(f"  • {e}" for e in errors)
+        )
+
+    def _generate_script_with_repair(self, script_prompt: str) -> str:
+        """Generate the companion runner script, feeding static-check errors
+        back to the HFScriptWriter agent until the script passes (or attempts
+        are exhausted — the best-effort script is then returned with warnings)."""
+        from kdream.exceptions import RecipeError
+
+        script = ""
+        errors: list[str] = []
+        for attempt in range(1, MAX_SCRIPT_ATTEMPTS + 1):
+            if attempt == 1:
+                raw = call_agent("hf-script-writer", script_prompt, self.client)
+            else:
+                console.print(
+                    f"  [yellow]Runner script invalid — repair attempt "
+                    f"{attempt - 1}/{MAX_SCRIPT_ATTEMPTS - 1}[/yellow]"
+                )
+                for e in errors[:6]:
+                    console.print(f"    [dim]{e}[/dim]")
+                msg = (
+                    script_prompt
+                    + "\n\n## Previous Script (BROKEN — must be fixed)\n"
+                    + "```python\n" + script + "\n```\n"
+                    + "\n## Errors To Fix\n"
+                    + "\n".join(f"- {e}" for e in errors)
+                    + "\n\nReturn the COMPLETE corrected Python script "
+                    "(not a diff)."
+                )
+                raw = call_agent("hf-script-writer", msg, self.client)
+
+            script = _extract_python(raw)
+            errors = _check_runner_script(script)
+            if not errors:
+                return script
+
+        if not script.strip():
+            raise RecipeError(
+                f"Could not generate a runner script after "
+                f"{MAX_SCRIPT_ATTEMPTS} attempts."
+            )
+        console.print(
+            f"[yellow]Runner script issues remain after "
+            f"{MAX_SCRIPT_ATTEMPTS} attempts ({len(errors)}):[/yellow]"
+        )
+        for e in errors:
+            console.print(f"  • {e}")
+        return script
 
     def generate(
         self,
@@ -829,8 +1067,6 @@ class RecipeGeneratorAgent:
                          ``None`` (default) auto-detects a TTY; False forces
                          non-interactive defaults (scriptable / testable).
         """
-        from kdream.core.recipe import parse_yaml_recipe, validate_recipe
-
         if interactive is None:
             interactive = _stdin_is_interactive()
 
@@ -976,52 +1212,32 @@ class RecipeGeneratorAgent:
             self.client,
         )
 
-        # ── Step 5: RecipeWriter ──────────────────────────────────────────
+        # ── Step 5: RecipeWriter (self-correcting) ────────────────────────
         console.print(f"\n[bold]5/{total_steps}[/bold] Writing recipe…")
-        recipe_yaml_raw = call_agent(
-            "recipe-writer",
+        writer_prompt = (
             f"Repository URL: {repo}\n\n"
             f"{hw_context}"
             f"## Repo Analysis\n{repo_analysis}\n\n"
             f"## Inference Mapping (entrypoint + parameters)\n{inference_info}\n\n"
             f"## Model Components\n{model_info}\n\n"
             "Generate a complete kdream YAML recipe. "
-            f"Set backends.local.tested_on to include \"{effective_arch}\".",
-            self.client,
+            f"Set backends.local.tested_on to include \"{effective_arch}\"."
         )
+        yaml_content, recipe = self._generate_recipe_with_repair(writer_prompt)
 
-        yaml_content = _extract_yaml(recipe_yaml_raw)
+        def _patch_tested_on(r) -> None:
+            # Ensures the architecture context is recorded regardless of what
+            # the AI wrote (it may have left the list empty or guessed wrong).
+            if r.backends.local is not None:
+                if effective_arch not in r.backends.local.tested_on:
+                    r.backends.local.tested_on.append(effective_arch)
+            elif cross_arch:
+                console.print(
+                    f"[dim]Note: no backends.local section found; "
+                    f"target arch ({effective_arch}) recorded in console only.[/dim]"
+                )
 
-        # ── Parse & validate ──────────────────────────────────────────────
-        try:
-            import yaml as _yaml
-            raw_data = _yaml.safe_load(yaml_content)
-            if isinstance(raw_data, dict):
-                raw_data = _sanitize_recipe_data(raw_data)
-            recipe = parse_yaml_recipe(_yaml.dump(raw_data, allow_unicode=True))
-        except Exception as exc:
-            console.print(f"[yellow]Warning:[/yellow] Could not parse recipe: {exc}")
-            console.print("[dim]Raw output:[/dim]\n" + yaml_content)
-            raise
-
-        # ── Patch tested_on to reflect the target architecture ────────────
-        # Ensures the architecture context is recorded regardless of what the
-        # AI wrote (it may have left the list empty or guessed incorrectly).
-        if recipe.backends.local is not None:
-            if effective_arch not in recipe.backends.local.tested_on:
-                recipe.backends.local.tested_on.append(effective_arch)
-        elif cross_arch:
-            # No local spec in the recipe at all — nothing to patch, just note it.
-            console.print(
-                f"[dim]Note: no backends.local section found; "
-                f"target arch ({effective_arch}) recorded in console only.[/dim]"
-            )
-
-        errors = validate_recipe(recipe)
-        if errors:
-            console.print(f"[yellow]Validation warnings ({len(errors)}):[/yellow]")
-            for err in errors:
-                console.print(f"  • {err}")
+        _patch_tested_on(recipe)
 
         # ── Step 6 (HF / hybrid): Generate companion runner script ────────
         # (Runner script is generated before component verification so the
@@ -1036,44 +1252,71 @@ class RecipeGeneratorAgent:
                     f"Format: {selected_variant['format']}\n"
                     f"Quantization: {selected_variant['quant_label']}\n"
                 )
-            script_raw = call_agent(
-                "hf-script-writer",
+            script_prompt = (
                 f"Model ID: {model_id}\n"
                 f"Pipeline Tag: {hf_info.get('pipeline_tag', '')}\n"
                 f"Library: {hf_info.get('library_name', '')}\n\n"
                 f"## Model Card\n{(hf_info.get('model_card') or '')[:4000]}\n\n"
                 f"## Inference Mapping\n{inference_info}\n\n"
                 f"## Model Components\n{model_info}"
-                f"{variant_ctx}",
-                self.client,
+                f"{variant_ctx}"
             )
-            recipe._runner_script = _extract_python(script_raw)
+            recipe._runner_script = self._generate_script_with_repair(script_prompt)
 
-        # ── Component verification ────────────────────────────────────────
+        # ── Component verification (with repair rounds) ───────────────────
         console.print(f"\n[bold]{total_steps + 1}/{total_steps + 1}[/bold] Verifying components…")
         from kdream.core.verifier import RecipeVerifier
         verifier = RecipeVerifier()
-        verification = verifier.verify(recipe, runner_script=recipe._runner_script)
 
-        if verification.warnings:
-            console.print(
-                f"[yellow]⚠ {len(verification.warnings)} warning(s):[/yellow]"
-            )
-            for w in verification.warnings:
-                console.print(f"  [yellow]{w}[/yellow]")
+        for verify_round in range(MAX_VERIFY_ROUNDS + 1):
+            verification = verifier.verify(recipe, runner_script=recipe._runner_script)
 
-        if not verification.ok:
+            if verification.warnings:
+                console.print(
+                    f"[yellow]⚠ {len(verification.warnings)} warning(s):[/yellow]"
+                )
+                for w in verification.warnings:
+                    console.print(f"  [yellow]{w}[/yellow]")
+
+            if verification.ok:
+                break
+
+            if verify_round == MAX_VERIFY_ROUNDS:
+                console.print(
+                    f"\n[bold red]✗ Component verification failed "
+                    f"({len(verification.errors)} error(s)):[/bold red]"
+                )
+                for err in verification.errors:
+                    console.print(f"  [red]{err}[/red]")
+                console.print(
+                    "\n[dim]The recipe has been generated but cannot be used until "
+                    "the above issues are resolved.[/dim]"
+                )
+                verification.raise_if_errors()
+
+            # Feed verifier errors back to the RecipeWriter and re-parse.
             console.print(
-                f"\n[bold red]✗ Component verification failed "
-                f"({len(verification.errors)} error(s)):[/bold red]"
+                f"  [yellow]Verification failed — repair round "
+                f"{verify_round + 1}/{MAX_VERIFY_ROUNDS}[/yellow]"
             )
-            for err in verification.errors:
-                console.print(f"  [red]{err}[/red]")
-            console.print(
-                "\n[dim]The recipe has been generated but cannot be used until "
-                "the above issues are resolved.[/dim]"
-            )
-            verification.raise_if_errors()
+            error_msgs = [str(e) for e in verification.errors]
+            for e in error_msgs[:6]:
+                console.print(f"    [dim]{e}[/dim]")
+            raw = self._repair_recipe(writer_prompt, yaml_content, error_msgs)
+            new_yaml = _extract_yaml(raw)
+            new_recipe, parse_errors = _try_parse_recipe(new_yaml)
+            if new_recipe is None:
+                # Repair produced unparseable YAML — keep the previous recipe
+                # and let the next round report the outstanding errors.
+                console.print(
+                    "  [yellow]Repair output unparseable — keeping previous "
+                    "recipe.[/yellow]"
+                )
+                continue
+            new_recipe._runner_script = recipe._runner_script
+            recipe = new_recipe
+            yaml_content = new_yaml
+            _patch_tested_on(recipe)
 
         console.print("[bold green]✓ All components verified.[/bold green]")
 
