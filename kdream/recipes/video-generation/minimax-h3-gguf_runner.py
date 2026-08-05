@@ -244,7 +244,7 @@ def main():
                         help="Random seed (-1 for random)")
     parser.add_argument("--workflow", type=str, default="minimax_fl2v_gguf_workflow.json",
                         help="ComfyUI workflow JSON file to use")
-    parser.add_argument("--variant", type=str, default="unet/MiniMax-H3-FL2VA-Q5_K_M.gguf",
+    parser.add_argument("--variant", type=str, default="unet/MiniMax-H3-FL2VA-Q4_K_M.gguf",
                         help="UNet GGUF variant filename within the repo")
     parser.add_argument("--output-dir", type=str, default="outputs",
                         help="Directory to save output videos")

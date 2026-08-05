@@ -3,7 +3,7 @@ kind: Recipe
 metadata:
   name: minimax-h3-gguf
   version: 1.0.0
-  description: MiniMax H3 omni-modal video generation with native stereo audio, supporting text/image-to-video at up to 2K resolution via GGUF-quantized ComfyUI workflow
+  description: MiniMax H3 omni-modal video generation with native stereo audio, text/image-to-video via GGUF quantization (unet Q4_K_M + text encoder Q4_K_M). Peak memory ~24 GB with sequential component loading (text encoder unloaded before diffusion) — fits 32 GB Apple Silicon. Use Q5_K_M variants on 48 GB+ machines.
   tags: [video-generation, image-to-video, multimodal, diffusion, transformer, gguf, quantized, open-source]
   license: MiniMax H3 Community License Agreement
   author: kdream-community
@@ -15,12 +15,12 @@ source:
   skip_package_install: true
 
 models:
-  - name: MiniMax-H3-FL2VA-Q5_K_M
+  - name: MiniMax-H3-FL2VA-Q4_K_M
     source: huggingface
     id: Abiray/MiniMax-H3-GGUF
-    file_path: unet/MiniMax-H3-FL2VA-Q5_K_M.gguf
+    file_path: unet/MiniMax-H3-FL2VA-Q4_K_M.gguf
     component_role: unet
-    destination: models/unet/MiniMax-H3-FL2VA-Q5_K_M.gguf
+    destination: models/unet/MiniMax-H3-FL2VA-Q4_K_M.gguf
 
   - name: MiniMax-H3-Qwen3VL-TextEncoder-Q4_K_M
     source: huggingface
@@ -117,8 +117,8 @@ inputs:
   variant:
     type: string
     required: false
-    default: MiniMax-H3-FL2VA-Q5_K_M.gguf
-    description: Model variant filename to use (e.g. MiniMax-H3-FL2VA-Q5_K_M.gguf). Override to switch quantization level (e.g. Q3 variants for lower memory usage).
+    default: MiniMax-H3-FL2VA-Q4_K_M.gguf
+    description: Model variant filename to use (e.g. MiniMax-H3-FL2VA-Q4_K_M.gguf). Override to switch quantization level (e.g. Q3 variants for lower memory usage).
 
 outputs:
   - name: result
@@ -128,5 +128,5 @@ outputs:
 backends:
   local:
     requires_gpu: false
-    min_vram_gb: 41
+    min_vram_gb: 24
     tested_on: [mps, cuda, cpu]
