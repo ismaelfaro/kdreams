@@ -252,14 +252,18 @@ class EnvironmentManager:
             return
 
         console.print(f"  Cloning [cyan]{repo_url}[/cyan] @ {ref} ...")
+        # Never smudge LFS files during clone: model repos (HuggingFace in
+        # particular) can carry hundreds of GB of LFS weights. Weights are
+        # downloaded selectively by ModelManager, not via git.
+        clone_env = {"GIT_LFS_SKIP_SMUDGE": "1"}
         try:
             import git  # type: ignore[import]
-            git.Repo.clone_from(repo_url, dest, depth=1, branch=ref)
+            git.Repo.clone_from(repo_url, dest, depth=1, branch=ref, env=clone_env)
         except Exception:
             # Fallback: try without branch spec (default branch)
             try:
                 import git  # type: ignore[import]
-                git.Repo.clone_from(repo_url, dest, depth=1)
+                git.Repo.clone_from(repo_url, dest, depth=1, env=clone_env)
             except Exception as e:
                 raise BackendError(f"Failed to clone repository {repo_url}: {e}") from e
 

@@ -145,58 +145,11 @@ def run_direct_inference(args, unet_path, text_encoder_path, video_vae_path, aud
     Attempt direct Python inference using diffusers or a custom MiniMax H3 pipeline.
     Falls back to instructions if no suitable library is found.
     """
-    try:
-        from diffusers import DiffusionPipeline  # type: ignore
-
-        print("[diffusers] Attempting to load MiniMax H3 via DiffusionPipeline ...")
-        dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
-
-        pipe = DiffusionPipeline.from_pretrained(
-            "MiniMaxAI/MiniMax-H3",
-            torch_dtype=dtype,
-        )
-        pipe = pipe.to(device)
-
-        if args.seed != -1:
-            generator = torch.Generator(device=device).manual_seed(args.seed)
-        else:
-            generator = None
-
-        n_frames = int(args.duration * 24)
-
-        kwargs = dict(
-            prompt=args.prompt,
-            negative_prompt=args.negative_prompt if args.negative_prompt else None,
-            num_inference_steps=args.steps,
-            guidance_scale=args.guidance_scale,
-            width=args.width,
-            height=args.height,
-            num_frames=n_frames,
-            generator=generator,
-        )
-
-        if args.first_frame_image:
-            from PIL import Image  # type: ignore
-            kwargs["image"] = Image.open(args.first_frame_image).convert("RGB")
-
-        result = pipe(**kwargs)
-
-        try:
-            frames = result.frames[0]
-            import imageio  # type: ignore
-            imageio.mimwrite(str(output_path), [frame for frame in frames], fps=24)
-        except AttributeError:
-            import imageio  # type: ignore
-            video = result.videos[0]
-            imageio.mimwrite(str(output_path), video, fps=24)
-
-        return True
-
-    except ImportError as e:
-        print(f"[diffusers] Import error: {e}")
-    except Exception as e:
-        print(f"[diffusers] Pipeline failed: {e}")
-
+    # NOTE: no diffusers fallback on purpose. DiffusionPipeline.from_pretrained
+    # on the base repo would download the ~498 GB full-precision model, which
+    # defeats the GGUF quantization and cannot fit on machines this recipe
+    # targets. The GGUF components require a ComfyUI (+ ComfyUI-GGUF nodes)
+    # pipeline for inference.
     print("[warning] No suitable video inference pipeline found for MiniMax H3 GGUF.")
     print("[warning] MiniMax H3 GGUF is primarily designed for use with ComfyUI.")
     print("[warning] Please install ComfyUI and the MiniMax H3 ComfyUI nodes.")
