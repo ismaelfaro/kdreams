@@ -13,6 +13,7 @@ source:
   ref: main
   install_extras:
     - torch
+    - torchvision
     - git+https://github.com/huggingface/diffusers.git
     - transformers
     - accelerate
