@@ -38,16 +38,43 @@ def log(msg: str) -> None:
     print(f"[minimax-h3] {msg}", flush=True)
 
 
-def pick_device() -> str:
+def detect_platform() -> tuple[str, str]:
+    """Detect the execution platform. Returns (platform, torch_device):
+
+    - ("nvidia", "cuda")  NVIDIA GPU — CUDA kernels, bnb/quanto quantization
+    - ("mac", "mps")      Apple Silicon — Metal via torch-MPS (or MLX, see
+                          try_mlx_runtime)
+    - ("cpu", "cpu")      everything else
+    """
     import torch
     env = os.environ.get("KDREAM_DEVICE", "").strip()
-    if env in ("cuda", "mps", "cpu"):
-        return env
+    if env == "cuda":
+        return "nvidia", "cuda"
+    if env == "mps":
+        return "mac", "mps"
+    if env == "cpu":
+        return "cpu", "cpu"
     if torch.cuda.is_available():
-        return "cuda"
+        return "nvidia", "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+        return "mac", "mps"
+    return "cpu", "cpu"
+
+
+def try_mlx_runtime():
+    """On Apple Silicon, use an MLX-native MiniMax-H3 pipeline when one is
+    importable. As of writing no Python MLX port of this model exists (the
+    only MLX implementation, mlx-serve, is an external server binary), so
+    this probe returns None and we fall back to torch's Metal (MPS) backend —
+    which is itself Apple-GPU-accelerated. The hook is here so an
+    `mlx_minimax_h3` package gets picked up automatically once published.
+    """
+    try:
+        import importlib
+        importlib.import_module("mlx.core")
+        return importlib.import_module("mlx_minimax_h3")
+    except ImportError:
+        return None
 
 
 def free_memory(device: str) -> None:
@@ -132,18 +159,34 @@ def make_block_pipelines(local_path: str):
     return encode.init_pipeline(local_path), denoise.init_pipeline(local_path)
 
 
-def component_quant_kwargs(kind: str, quantization: str, dtype):
-    """kind: 'transformers' | 'diffusers'."""
+def component_quant_kwargs(kind: str, quantization: str, dtype, platform: str):
+    """kind: 'transformers' | 'diffusers'.
+
+    NVIDIA gets bitsandbytes NF4 (fused CUDA kernels) when requested int4;
+    Mac/CPU get optimum-quanto, which runs on Metal/CPU.
+    """
     kwargs = {"torch_dtype": dtype}
-    if quantization in ("int4", "int8"):
-        if kind == "transformers":
-            from transformers import QuantoConfig
-            kwargs["quantization_config"] = QuantoConfig(weights=quantization)
-        else:
-            from diffusers import QuantoConfig
-            kwargs["quantization_config"] = QuantoConfig(
-                weights_dtype=quantization,
+    if quantization not in ("int4", "int8"):
+        return kwargs
+    if platform == "nvidia" and quantization == "int4":
+        try:
+            if kind == "transformers":
+                from transformers import BitsAndBytesConfig
+            else:
+                from diffusers import BitsAndBytesConfig
+            kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=dtype,
             )
+            return kwargs
+        except ImportError:
+            pass  # fall through to quanto
+    if kind == "transformers":
+        from transformers import QuantoConfig
+        kwargs["quantization_config"] = QuantoConfig(weights=quantization)
+    else:
+        from diffusers import QuantoConfig
+        kwargs["quantization_config"] = QuantoConfig(weights_dtype=quantization)
     return kwargs
 
 
@@ -167,9 +210,18 @@ def main() -> int:
     args = parser.parse_args()
 
     import torch
-    device = pick_device()
+    platform, device = detect_platform()
     dtype = torch.bfloat16 if device != "cpu" else torch.float32
-    log(f"device={device} dtype={dtype} quantization={args.quantization}")
+    log(f"platform={platform} device={device} dtype={dtype} "
+        f"quantization={args.quantization}")
+
+    if platform == "mac":
+        mlx_runtime = try_mlx_runtime()
+        if mlx_runtime is not None:
+            log("MLX runtime for MiniMax-H3 detected — using MLX execution.")
+            return mlx_runtime.run(vars(args))
+        log("No Python MLX pipeline for MiniMax-H3 available — using torch "
+            "Metal (MPS) backend (Apple-GPU accelerated).")
 
     if os.environ.get("KDREAM_FORCE_IPV4") == "1":
         # Some networks have a broken/throttled IPv6 path to the HF CDN.
@@ -207,7 +259,7 @@ def main() -> int:
     )
     encode_pipe.load_components(
         names=["text_encoder"],
-        **component_quant_kwargs("transformers", args.quantization, dtype),
+        **component_quant_kwargs("transformers", args.quantization, dtype, platform),
     )
 
     enc_inputs = {
@@ -224,7 +276,12 @@ def main() -> int:
         if args.last_frame_image:
             enc_inputs["last_image"] = load_image(args.last_frame_image)
 
-    encode_pipe.to(device)
+    # On NVIDIA the encoder fits VRAM comfortably once quantized; move it.
+    # On Mac/CPU keep the encode phase on CPU: unified memory means MPS gains
+    # little for one forward pass, and the .to("mps") copy transiently doubles
+    # the quantized encoder's footprint (observed OOM-kill on 32 GB machines).
+    if platform == "nvidia":
+        encode_pipe.to(device)
     state = encode_pipe(**enc_inputs)
     log(f"Phase 1 done in {time.time() - t0:.0f}s")
 
@@ -251,7 +308,7 @@ def main() -> int:
     denoise_pipe.load_components(names=["vae", "audio_vae"], torch_dtype=dtype)
     denoise_pipe.load_components(
         names=["transformer"],
-        **component_quant_kwargs("diffusers", args.quantization, dtype),
+        **component_quant_kwargs("diffusers", args.quantization, dtype, platform),
     )
     # transformer_ref is only needed for reference-to-video; skip it.
 
