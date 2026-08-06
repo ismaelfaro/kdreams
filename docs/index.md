@@ -20,6 +20,7 @@ That's it. kdream handles the repo clone, UV environment, model weights, and inf
 
 - [API Reference](api.md) — Python API and CLI reference
 - [Recipe Format](recipes.md) — Writing and contributing recipes
+- [Big Models & Troubleshooting](troubleshooting.md) — `kdream doctor`, memory gating, download resilience, environment knobs
 - [Contributing](../CONTRIBUTING.md) — How to contribute
 
 ## Key Concepts

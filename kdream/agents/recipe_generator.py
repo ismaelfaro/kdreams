@@ -372,6 +372,187 @@ def search_hf_quantized_alternatives(
 
 
 # ---------------------------------------------------------------------------
+# Quantized derivative discovery (HF base_model:quantized:<id> relation)
+# ---------------------------------------------------------------------------
+
+# Formats runnable per accelerator. mlx is Apple-only; fp8/nvfp4/awq/gptq
+# need NVIDIA hardware; gguf runs everywhere via llama-cpp/stable-diffusion-cpp.
+_DERIVATIVE_FORMAT_COMPAT: dict[str, set[str]] = {
+    "gguf": {"cuda", "mps", "cpu"},
+    "mlx": {"mps"},
+    "awq": {"cuda"},
+    "gptq": {"cuda"},
+    "fp8": {"cuda"},
+    "nvfp4": {"cuda"},
+    "int4": {"cuda"},
+    "nf4": {"cuda"},
+}
+
+
+def _derivative_format(model: Any) -> str:
+    """Guess the quantization format of a derivative repo from tags + id."""
+    mid = (model.id if hasattr(model, "id") else str(model)).lower()
+    tags = {t.lower() for t in (getattr(model, "tags", None) or [])}
+    for fmt in ("gguf", "mlx", "awq", "gptq"):
+        if fmt in tags or fmt in mid:
+            return fmt
+    if "fp8" in mid or "fp8" in tags:
+        return "fp8"
+    if "nvfp4" in mid:
+        return "nvfp4"
+    if "nf4" in mid:
+        return "nf4"
+    if "int4" in mid or "4-bit" in tags or "w4a16" in mid:
+        return "int4"
+    return "unknown"
+
+
+def _derivative_weight_gb(model_id: str) -> tuple[float, float]:
+    """Return (total_weight_gb, smallest_single_weight_gb) for a HF repo.
+
+    Uses file metadata so callers can judge whether the quantized model fits
+    this machine. Returns (0.0, 0.0) when metadata is unavailable.
+    """
+    try:
+        from huggingface_hub import HfApi  # type: ignore[import]
+        info = HfApi().model_info(model_id, files_metadata=True)
+    except Exception:
+        return 0.0, 0.0
+    total = 0
+    smallest = 0
+    for sib in getattr(info, "siblings", None) or []:
+        size = getattr(sib, "size", None) or 0
+        if not size or not sib.rfilename.lower().endswith(_WEIGHT_EXTENSIONS):
+            continue
+        total += size
+        if smallest == 0 or size < smallest:
+            smallest = size
+    return total / (1024 ** 3), smallest / (1024 ** 3)
+
+
+def search_hf_quantized_derivatives(
+    model_id: str, interactive: bool = True,
+) -> dict[str, Any] | None:
+    """Find quantized derivatives of *model_id* via HF's structured
+    ``base_model:quantized:<id>`` relation (the web UI's
+    ``huggingface.co/models?other=base_model:quantized:<id>`` filter) and let
+    the user (or an auto-picker) choose one that can run on this machine.
+
+    Returns the derivative's full HF info dict (``get_hf_model_info``) or
+    None to continue with the original full-precision model.
+    """
+    try:
+        from huggingface_hub import HfApi  # type: ignore[import]
+        api = HfApi()
+        candidates = list(api.list_models(
+            filter=f"base_model:quantized:{model_id}",
+            sort="downloads",
+            limit=20,
+        ))
+    except Exception as exc:
+        console.print(f"  [dim]Quantized-derivative search failed: {exc}[/dim]")
+        return None
+
+    if not candidates:
+        console.print("  [dim]No quantized derivatives found on the Hub.[/dim]")
+        return None
+
+    accelerator = _detect_accelerator()
+    ram_gb = _total_system_memory_gb()
+
+    scored: list[dict[str, Any]] = []
+    for c in candidates:
+        fmt = _derivative_format(c)
+        compat = accelerator in _DERIVATIVE_FORMAT_COMPAT.get(fmt, set())
+        scored.append({
+            "id": c.id,
+            "format": fmt,
+            "downloads": getattr(c, "downloads", 0) or 0,
+            "compatible": compat,
+        })
+    # Compatible formats first, then by downloads
+    scored.sort(key=lambda d: (not d["compatible"], -d["downloads"]))
+
+    # Fetch sizes for the top candidates only (one API call each)
+    for d in scored[:8]:
+        total_gb, smallest_gb = _derivative_weight_gb(d["id"])
+        d["total_gb"] = total_gb
+        d["smallest_gb"] = smallest_gb
+        # A repo "fits" when its smallest weight variant leaves headroom.
+        # For sharded (multi-file) repos the smallest single file understates
+        # the requirement, so also require the total to be plausible for
+        # non-gguf formats.
+        need = smallest_gb if d["format"] == "gguf" else total_gb
+        d["fits"] = bool(need) and ram_gb > 0 and need <= ram_gb * 0.8
+
+    # Final order: options that FIT this machine first, then merely
+    # compatible ones, then the rest — each group by downloads.
+    scored.sort(key=lambda d: (
+        not d.get("fits", False), not d["compatible"], -d["downloads"],
+    ))
+
+    console.print(
+        f"\n[bold]Quantized derivatives of {model_id}[/bold] "
+        f"[dim](base_model:quantized relation — accelerator: "
+        f"{accelerator.upper()}, RAM {ram_gb:.0f} GB)[/dim]"
+    )
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Model ID")
+    table.add_column("Format")
+    table.add_column("Downloads", justify="right")
+    table.add_column("Weights", justify="right")
+    table.add_column("Fits", width=6)
+
+    shown = scored[:8]
+    for i, d in enumerate(shown, 1):
+        size_str = (
+            f"{d.get('total_gb', 0):.1f} GB"
+            + (f" (min {d['smallest_gb']:.1f})" if d.get("smallest_gb") else "")
+            if d.get("total_gb") else "—"
+        )
+        fits_str = (
+            "[green]Yes[/green]" if d.get("fits")
+            else ("[red]No[/red]" if d["compatible"] else "[red]—[/red]")
+        )
+        model_label = d["id"] if d["compatible"] else f"[dim]{d['id']}[/dim]"
+        table.add_row(str(i), model_label, d["format"].upper(),
+                      str(d["downloads"]), size_str, fits_str)
+    skip_idx = len(shown) + 1
+    table.add_row(str(skip_idx), "[dim]Skip — use the original model[/dim]",
+                  "", "", "", "")
+    console.print(table)
+
+    if interactive:
+        choice = IntPrompt.ask(
+            "\n[bold]Select a quantized derivative (or skip)[/bold]",
+            choices=[str(i) for i in range(1, skip_idx + 1)],
+            default=1 if shown and shown[0]["compatible"] else skip_idx,
+        )
+        if choice == skip_idx:
+            console.print("  [dim]Continuing with the original model.[/dim]")
+            return None
+        selected = shown[choice - 1]
+    else:
+        # Auto-pick: best-downloaded compatible derivative that fits memory,
+        # else best compatible one, else keep the original model.
+        fitting = [d for d in shown if d["compatible"] and d.get("fits")]
+        compatible = [d for d in shown if d["compatible"]]
+        selected = (fitting or compatible or [None])[0]
+        if selected is None:
+            console.print(
+                "  [dim]No compatible quantized derivative — keeping the "
+                "original model.[/dim]"
+            )
+            return None
+        console.print(f"  [green]Auto-selected:[/green] {selected['id']}")
+
+    info = get_hf_model_info(selected["id"])
+    info["quantized_from"] = model_id
+    return info
+
+
+# ---------------------------------------------------------------------------
 # Quantized variant detection
 # ---------------------------------------------------------------------------
 
@@ -550,21 +731,39 @@ def _prompt_variant_selection(
         # Fall through and show all variants anyway
         compatible = [(i, v) for i, v in enumerate(variants)]
 
-    # Build the selection table
+    # Build the selection table. Order: variants that FIT this machine's
+    # memory first (largest = best quality first), then compatible variants
+    # that don't fit (smallest first — closest to fitting), then incompatible.
+    # A single component file gets 60% of RAM — the rest is reserved for the
+    # other pipeline components (text encoder, VAE), activations, and the OS.
+    ram_budget_bytes = _total_system_memory_gb() * 0.6 * (1024 ** 3)
+
+    def _fits(v: dict) -> bool:
+        size = v.get("size_bytes", 0) or 0
+        return bool(size) and ram_budget_bytes > 0 and size <= ram_budget_bytes
+
+    def _order_key(entry: tuple[int, dict]) -> tuple:
+        _, v = entry
+        supported = _FORMAT_HARDWARE_COMPAT.get(v["format"], set())
+        compat = accelerator in supported
+        fits = _fits(v)
+        size = v.get("size_bytes", 0) or 0
+        # fitting: bigger is better; not fitting: smaller is closer to usable
+        return (not fits, not compat, -size if fits else size)
+
+    display_order: list[tuple[int, dict[str, str]]] = sorted(
+        [(i, v) for i, v in compatible] + [(i, v) for i, v in incompatible],
+        key=_order_key,
+    )
+
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("#", style="dim", width=4)
     table.add_column("Variant")
     table.add_column("Format")
     table.add_column("Size", justify="right")
     table.add_column("Compat", width=8)
+    table.add_column("Fits", width=6)
     table.add_column("File")
-
-    # Show compatible variants first
-    display_order: list[tuple[int, dict[str, str]]] = []
-    for orig_idx, v in compatible:
-        display_order.append((orig_idx, v))
-    for orig_idx, v in incompatible:
-        display_order.append((orig_idx, v))
 
     for display_num, (_, v) in enumerate(display_order, 1):
         supported = _FORMAT_HARDWARE_COMPAT.get(v["format"], set())
@@ -572,15 +771,17 @@ def _prompt_variant_selection(
             compat_str = "[green]Yes[/green]"
         else:
             compat_str = "[red]No[/red]"
+        fits_str = "[green]Yes[/green]" if _fits(v) else "[red]No[/red]"
         size_bytes = v.get("size_bytes", 0)
         if size_bytes > 0:
             size_gb = size_bytes / (1024 ** 3)
             size_str = f"{size_gb:.1f} GB"
         else:
             size_str = "—"
+            fits_str = "—"
         table.add_row(
             str(display_num), v["quant_label"], v["format"].upper(),
-            size_str, compat_str, v["filename"],
+            size_str, compat_str, fits_str, v["filename"],
         )
 
     console.print(table)
@@ -598,7 +799,9 @@ def _prompt_variant_selection(
             default=1,
         )
     else:
-        choice = 1  # display_order is compatible-first; pick the best default
+        # display_order is best-first: fits-largest, then compatible, then
+        # incompatible — so the first entry is the best runnable choice.
+        choice = 1
     selected_orig_idx, selected = display_order[choice - 1]
 
     # Warn if user picked an incompatible variant
@@ -702,10 +905,17 @@ def _build_hf_base_msg(
             f"quantization: {selected_variant['quant_label']}, "
             f"{compat_note})\n"
         )
+    quantized_from_line = ""
+    if hf_info.get("quantized_from"):
+        quantized_from_line = (
+            f"Quantized derivative of: {hf_info['quantized_from']} "
+            f"(https://huggingface.co/{hf_info['quantized_from']})\n"
+        )
     return (
         f"SOURCE_TYPE: huggingface\n"
         f"Model ID: {hf_info['model_id']}\n"
         f"URL: {hf_info['url']}\n"
+        f"{quantized_from_line}"
         f"Accelerator: {accelerator}\n"
         f"{github_line}"
         f"{variant_line}"
@@ -715,6 +925,7 @@ def _build_hf_base_msg(
         f"License: {hf_info['license']}\n"
         f"Downloads: {hf_info['downloads']}\n\n"
         f"## Model Card\n{hf_info['model_card'] or '(unavailable)'}\n\n"
+        f"{_build_resource_context(hf_info)}\n"
         f"## Files in Repository (with sizes)\n"
         f"{_format_file_listing(hf_info['files'].split(chr(10)) if hf_info['files'] else [], hf_info.get('file_sizes', {}))}"
     )
@@ -785,6 +996,126 @@ def _extract_python(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive generation — self-correcting parse / validate / verify loops
+# ---------------------------------------------------------------------------
+
+MAX_RECIPE_ATTEMPTS = 3   # initial write + repairs for YAML parse/validation
+MAX_SCRIPT_ATTEMPTS = 3   # initial write + repairs for the runner script
+MAX_VERIFY_ROUNDS = 2     # repair rounds driven by component verification
+
+_WEIGHT_EXTENSIONS = (
+    ".safetensors", ".gguf", ".bin", ".pt", ".pth", ".onnx", ".ckpt", ".awq",
+)
+
+
+def _estimate_weight_size_gb(file_sizes: dict[str, int]) -> float:
+    """Sum the size of all model-weight files in a HF repo, in GB."""
+    total = 0
+    for fname, size in (file_sizes or {}).items():
+        if fname.lower().endswith(_WEIGHT_EXTENSIONS):
+            total += size or 0
+    return total / (1024 ** 3)
+
+
+def _total_system_memory_gb() -> float:
+    """Total physical memory of this machine in GB (0.0 if undetectable)."""
+    try:
+        import psutil  # type: ignore[import]
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        pass
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return int(out.stdout.strip()) / (1024 ** 3)
+        meminfo = Path("/proc/meminfo").read_text()
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) / (1024 ** 2)  # kB → GB
+    except Exception:
+        pass
+    return 0.0
+
+
+def _build_resource_context(hf_info: dict[str, Any]) -> str:
+    """Describe model weight size vs. machine memory so agents can set
+    realistic memory requirements and warn when a model cannot run locally."""
+    weights_gb = _estimate_weight_size_gb(hf_info.get("file_sizes") or {})
+    ram_gb = _total_system_memory_gb()
+    if weights_gb <= 0:
+        return ""
+    lines = [
+        "## Resource Estimate",
+        f"Total model weight files in the repository: {weights_gb:.1f} GB",
+    ]
+    if ram_gb:
+        lines.append(f"This machine's total memory (RAM/unified): {ram_gb:.1f} GB")
+        if weights_gb > ram_gb:
+            lines.append(
+                "WARNING: the full-precision weights exceed this machine's memory. "
+                "Set backends.local.min_vram_gb to the realistic memory needed to "
+                "load the components required for ONE inference run (not the whole "
+                "repository if it contains multiple variants), and state the "
+                "hardware requirement clearly in the recipe description."
+            )
+    lines.append(
+        "Use the per-file sizes in the file listing to compute the minimum "
+        "resident memory (e.g. transformer + text encoder + VAE for one variant) "
+        "and record it in backends.local.min_vram_gb."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _try_parse_recipe(yaml_content: str) -> tuple[Any | None, list[str]]:
+    """Parse + sanitize + validate a recipe YAML string.
+
+    Returns ``(recipe, errors)``. ``recipe`` is None when the YAML cannot be
+    parsed into the schema at all; otherwise ``errors`` holds repairable
+    validation findings (empty list = fully valid).
+    """
+    from kdream.core.recipe import parse_yaml_recipe, validate_recipe
+
+    import yaml as _yaml
+    try:
+        raw = _yaml.safe_load(yaml_content)
+    except Exception as exc:
+        return None, [f"YAML parse error: {exc}"]
+    if not isinstance(raw, dict):
+        return None, ["Recipe must be a YAML mapping at the top level."]
+    raw = _sanitize_recipe_data(raw)
+    try:
+        recipe = parse_yaml_recipe(_yaml.dump(raw, allow_unicode=True))
+    except Exception as exc:
+        return None, [f"Recipe schema error: {exc}"]
+    return recipe, [str(e) for e in validate_recipe(recipe)]
+
+
+def _check_runner_script(script: str) -> list[str]:
+    """Static checks on a generated runner script. Returns repairable errors."""
+    errors: list[str] = []
+    if not script.strip():
+        return ["The script is empty — return a complete Python script."]
+    try:
+        compile(script, "run.py", "exec")
+    except SyntaxError as exc:
+        errors.append(f"Python syntax error at line {exc.lineno}: {exc.msg}")
+    if not any(ind in script for ind in ("argparse", "click", "sys.argv", "typer")):
+        errors.append(
+            "The script must accept CLI arguments (use argparse) matching the "
+            "recipe inputs."
+        )
+    if "OUTPUT:" not in script:
+        errors.append(
+            "The script must print each output path to stdout as 'OUTPUT:<path>'."
+        )
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Agent pipeline
 # ---------------------------------------------------------------------------
 
@@ -795,6 +1126,123 @@ class RecipeGeneratorAgent:
     def __init__(self, api_key: str | None = None):
         import anthropic  # type: ignore[import]
         self.client = anthropic.Anthropic(api_key=api_key)
+
+    # ------------------------------------------------------------------
+    # Self-correcting generation loops
+    # ------------------------------------------------------------------
+
+    def _repair_recipe(
+        self, writer_prompt: str, previous_yaml: str, errors: list[str],
+    ) -> str:
+        """Ask the RecipeWriter agent to fix its previous output."""
+        msg = (
+            writer_prompt
+            + "\n\n## Previous Attempt (INVALID — must be fixed)\n"
+            + "```yaml\n" + previous_yaml + "\n```\n"
+            + "\n## Errors To Fix\n"
+            + "\n".join(f"- {e}" for e in errors)
+            + "\n\nReturn the COMPLETE corrected YAML recipe (not a diff). "
+            "Fix every error above and keep everything that was already correct."
+        )
+        return call_agent("recipe-writer", msg, self.client)
+
+    def _generate_recipe_with_repair(
+        self, writer_prompt: str,
+    ) -> tuple[str, Any]:
+        """Generate a recipe YAML, feeding parse/validation errors back to the
+        RecipeWriter agent until it is valid (or attempts are exhausted).
+
+        Returns ``(yaml_content, recipe)``. Raises :class:`RecipeError` only
+        when no attempt produced a schema-parseable recipe at all.
+        """
+        from kdream.exceptions import RecipeError
+
+        yaml_content = ""
+        errors: list[str] = []
+        best: tuple[str, Any, list[str]] | None = None
+
+        for attempt in range(1, MAX_RECIPE_ATTEMPTS + 1):
+            if attempt == 1:
+                raw = call_agent("recipe-writer", writer_prompt, self.client)
+            else:
+                console.print(
+                    f"  [yellow]Recipe invalid — repair attempt "
+                    f"{attempt - 1}/{MAX_RECIPE_ATTEMPTS - 1}[/yellow]"
+                )
+                for e in errors[:6]:
+                    console.print(f"    [dim]{e}[/dim]")
+                raw = self._repair_recipe(writer_prompt, yaml_content, errors)
+
+            yaml_content = _extract_yaml(raw)
+            recipe, errors = _try_parse_recipe(yaml_content)
+            if recipe is not None and not errors:
+                return yaml_content, recipe
+            if recipe is not None:
+                best = (yaml_content, recipe, errors)
+
+        if best is not None:
+            yaml_content, recipe, errors = best
+            console.print(
+                f"[yellow]Validation warnings remain after "
+                f"{MAX_RECIPE_ATTEMPTS} attempts ({len(errors)}):[/yellow]"
+            )
+            for err in errors:
+                console.print(f"  • {err}")
+            return yaml_content, recipe
+
+        console.print("[dim]Last raw output:[/dim]\n" + yaml_content)
+        raise RecipeError(
+            f"Could not generate a parseable recipe after "
+            f"{MAX_RECIPE_ATTEMPTS} attempts. Last errors:\n"
+            + "\n".join(f"  • {e}" for e in errors)
+        )
+
+    def _generate_script_with_repair(self, script_prompt: str) -> str:
+        """Generate the companion runner script, feeding static-check errors
+        back to the HFScriptWriter agent until the script passes (or attempts
+        are exhausted — the best-effort script is then returned with warnings)."""
+        from kdream.exceptions import RecipeError
+
+        script = ""
+        errors: list[str] = []
+        for attempt in range(1, MAX_SCRIPT_ATTEMPTS + 1):
+            if attempt == 1:
+                raw = call_agent("hf-script-writer", script_prompt, self.client)
+            else:
+                console.print(
+                    f"  [yellow]Runner script invalid — repair attempt "
+                    f"{attempt - 1}/{MAX_SCRIPT_ATTEMPTS - 1}[/yellow]"
+                )
+                for e in errors[:6]:
+                    console.print(f"    [dim]{e}[/dim]")
+                msg = (
+                    script_prompt
+                    + "\n\n## Previous Script (BROKEN — must be fixed)\n"
+                    + "```python\n" + script + "\n```\n"
+                    + "\n## Errors To Fix\n"
+                    + "\n".join(f"- {e}" for e in errors)
+                    + "\n\nReturn the COMPLETE corrected Python script "
+                    "(not a diff)."
+                )
+                raw = call_agent("hf-script-writer", msg, self.client)
+
+            script = _extract_python(raw)
+            errors = _check_runner_script(script)
+            if not errors:
+                return script
+
+        if not script.strip():
+            raise RecipeError(
+                f"Could not generate a runner script after "
+                f"{MAX_SCRIPT_ATTEMPTS} attempts."
+            )
+        console.print(
+            f"[yellow]Runner script issues remain after "
+            f"{MAX_SCRIPT_ATTEMPTS} attempts ({len(errors)}):[/yellow]"
+        )
+        for e in errors:
+            console.print(f"  • {e}")
+        return script
 
     def generate(
         self,
@@ -829,8 +1277,6 @@ class RecipeGeneratorAgent:
                          ``None`` (default) auto-detects a TTY; False forces
                          non-interactive defaults (scriptable / testable).
         """
-        from kdream.core.recipe import parse_yaml_recipe, validate_recipe
-
         if interactive is None:
             interactive = _stdin_is_interactive()
 
@@ -886,6 +1332,13 @@ class RecipeGeneratorAgent:
         if _is_hf:
             model_id = hf_model_id_from_url(repo)
             hf_info = get_hf_model_info(model_id)
+
+            # Surface quantized derivatives (base_model:quantized:<id>) so the
+            # recipe targets a model that can actually run on this machine.
+            derivative = search_hf_quantized_derivatives(model_id, interactive)
+            if derivative is not None:
+                hf_info = derivative
+                model_id = hf_info["model_id"]
 
             # Prompt user to select a quantized variant if available
             variants = hf_info.get("quantized_variants", [])
@@ -976,52 +1429,32 @@ class RecipeGeneratorAgent:
             self.client,
         )
 
-        # ── Step 5: RecipeWriter ──────────────────────────────────────────
+        # ── Step 5: RecipeWriter (self-correcting) ────────────────────────
         console.print(f"\n[bold]5/{total_steps}[/bold] Writing recipe…")
-        recipe_yaml_raw = call_agent(
-            "recipe-writer",
+        writer_prompt = (
             f"Repository URL: {repo}\n\n"
             f"{hw_context}"
             f"## Repo Analysis\n{repo_analysis}\n\n"
             f"## Inference Mapping (entrypoint + parameters)\n{inference_info}\n\n"
             f"## Model Components\n{model_info}\n\n"
             "Generate a complete kdream YAML recipe. "
-            f"Set backends.local.tested_on to include \"{effective_arch}\".",
-            self.client,
+            f"Set backends.local.tested_on to include \"{effective_arch}\"."
         )
+        yaml_content, recipe = self._generate_recipe_with_repair(writer_prompt)
 
-        yaml_content = _extract_yaml(recipe_yaml_raw)
+        def _patch_tested_on(r) -> None:
+            # Ensures the architecture context is recorded regardless of what
+            # the AI wrote (it may have left the list empty or guessed wrong).
+            if r.backends.local is not None:
+                if effective_arch not in r.backends.local.tested_on:
+                    r.backends.local.tested_on.append(effective_arch)
+            elif cross_arch:
+                console.print(
+                    f"[dim]Note: no backends.local section found; "
+                    f"target arch ({effective_arch}) recorded in console only.[/dim]"
+                )
 
-        # ── Parse & validate ──────────────────────────────────────────────
-        try:
-            import yaml as _yaml
-            raw_data = _yaml.safe_load(yaml_content)
-            if isinstance(raw_data, dict):
-                raw_data = _sanitize_recipe_data(raw_data)
-            recipe = parse_yaml_recipe(_yaml.dump(raw_data, allow_unicode=True))
-        except Exception as exc:
-            console.print(f"[yellow]Warning:[/yellow] Could not parse recipe: {exc}")
-            console.print("[dim]Raw output:[/dim]\n" + yaml_content)
-            raise
-
-        # ── Patch tested_on to reflect the target architecture ────────────
-        # Ensures the architecture context is recorded regardless of what the
-        # AI wrote (it may have left the list empty or guessed incorrectly).
-        if recipe.backends.local is not None:
-            if effective_arch not in recipe.backends.local.tested_on:
-                recipe.backends.local.tested_on.append(effective_arch)
-        elif cross_arch:
-            # No local spec in the recipe at all — nothing to patch, just note it.
-            console.print(
-                f"[dim]Note: no backends.local section found; "
-                f"target arch ({effective_arch}) recorded in console only.[/dim]"
-            )
-
-        errors = validate_recipe(recipe)
-        if errors:
-            console.print(f"[yellow]Validation warnings ({len(errors)}):[/yellow]")
-            for err in errors:
-                console.print(f"  • {err}")
+        _patch_tested_on(recipe)
 
         # ── Step 6 (HF / hybrid): Generate companion runner script ────────
         # (Runner script is generated before component verification so the
@@ -1036,44 +1469,71 @@ class RecipeGeneratorAgent:
                     f"Format: {selected_variant['format']}\n"
                     f"Quantization: {selected_variant['quant_label']}\n"
                 )
-            script_raw = call_agent(
-                "hf-script-writer",
+            script_prompt = (
                 f"Model ID: {model_id}\n"
                 f"Pipeline Tag: {hf_info.get('pipeline_tag', '')}\n"
                 f"Library: {hf_info.get('library_name', '')}\n\n"
                 f"## Model Card\n{(hf_info.get('model_card') or '')[:4000]}\n\n"
                 f"## Inference Mapping\n{inference_info}\n\n"
                 f"## Model Components\n{model_info}"
-                f"{variant_ctx}",
-                self.client,
+                f"{variant_ctx}"
             )
-            recipe._runner_script = _extract_python(script_raw)
+            recipe._runner_script = self._generate_script_with_repair(script_prompt)
 
-        # ── Component verification ────────────────────────────────────────
+        # ── Component verification (with repair rounds) ───────────────────
         console.print(f"\n[bold]{total_steps + 1}/{total_steps + 1}[/bold] Verifying components…")
         from kdream.core.verifier import RecipeVerifier
         verifier = RecipeVerifier()
-        verification = verifier.verify(recipe, runner_script=recipe._runner_script)
 
-        if verification.warnings:
-            console.print(
-                f"[yellow]⚠ {len(verification.warnings)} warning(s):[/yellow]"
-            )
-            for w in verification.warnings:
-                console.print(f"  [yellow]{w}[/yellow]")
+        for verify_round in range(MAX_VERIFY_ROUNDS + 1):
+            verification = verifier.verify(recipe, runner_script=recipe._runner_script)
 
-        if not verification.ok:
+            if verification.warnings:
+                console.print(
+                    f"[yellow]⚠ {len(verification.warnings)} warning(s):[/yellow]"
+                )
+                for w in verification.warnings:
+                    console.print(f"  [yellow]{w}[/yellow]")
+
+            if verification.ok:
+                break
+
+            if verify_round == MAX_VERIFY_ROUNDS:
+                console.print(
+                    f"\n[bold red]✗ Component verification failed "
+                    f"({len(verification.errors)} error(s)):[/bold red]"
+                )
+                for err in verification.errors:
+                    console.print(f"  [red]{err}[/red]")
+                console.print(
+                    "\n[dim]The recipe has been generated but cannot be used until "
+                    "the above issues are resolved.[/dim]"
+                )
+                verification.raise_if_errors()
+
+            # Feed verifier errors back to the RecipeWriter and re-parse.
             console.print(
-                f"\n[bold red]✗ Component verification failed "
-                f"({len(verification.errors)} error(s)):[/bold red]"
+                f"  [yellow]Verification failed — repair round "
+                f"{verify_round + 1}/{MAX_VERIFY_ROUNDS}[/yellow]"
             )
-            for err in verification.errors:
-                console.print(f"  [red]{err}[/red]")
-            console.print(
-                "\n[dim]The recipe has been generated but cannot be used until "
-                "the above issues are resolved.[/dim]"
-            )
-            verification.raise_if_errors()
+            error_msgs = [str(e) for e in verification.errors]
+            for e in error_msgs[:6]:
+                console.print(f"    [dim]{e}[/dim]")
+            raw = self._repair_recipe(writer_prompt, yaml_content, error_msgs)
+            new_yaml = _extract_yaml(raw)
+            new_recipe, parse_errors = _try_parse_recipe(new_yaml)
+            if new_recipe is None:
+                # Repair produced unparseable YAML — keep the previous recipe
+                # and let the next round report the outstanding errors.
+                console.print(
+                    "  [yellow]Repair output unparseable — keeping previous "
+                    "recipe.[/yellow]"
+                )
+                continue
+            new_recipe._runner_script = recipe._runner_script
+            recipe = new_recipe
+            yaml_content = new_yaml
+            _patch_tested_on(recipe)
 
         console.print("[bold green]✓ All components verified.[/bold green]")
 

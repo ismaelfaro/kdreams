@@ -1113,5 +1113,110 @@ def cache_info(cache_dir):
         console.print("[dim]Cache is empty (directory does not exist yet)[/dim]")
 
 
+@cli.command()
+@click.option("--skip-network", is_flag=True, default=False,
+              help="Skip the HuggingFace CDN speed probe (faster).")
+def doctor(skip_network):
+    """Diagnose this machine for running AI models.
+
+    Checks hardware, memory, disk, tooling, and the network path to the
+    HuggingFace CDN, and prints the KDREAM_* environment knobs that fix
+    the problems it finds.
+    """
+    import os
+    import shutil as _shutil
+    import sys as _sys
+
+    from kdream.backends.local import (
+        HardwareDetector,
+        available_memory_gb,
+        total_memory_gb,
+    )
+
+    console.print("[bold]kdream doctor[/bold]\n")
+
+    def row(label, value, good=True, note=""):
+        icon = "[green]✓[/green]" if good else "[yellow]![/yellow]"
+        line = f"  {icon} {label}: [bold]{value}[/bold]"
+        if note:
+            line += f"  [dim]{note}[/dim]"
+        console.print(line)
+
+    # ── Tooling ───────────────────────────────────────────────────────
+    console.print("[bold]Tooling[/bold]")
+    py = f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}"
+    row("python", py, good=_sys.version_info >= (3, 10))
+    uv_path = _shutil.which("uv")
+    row("uv", uv_path or "not found", good=bool(uv_path),
+        note="" if uv_path else "install: https://docs.astral.sh/uv/")
+    git_path = _shutil.which("git")
+    row("git", git_path or "not found", good=bool(git_path))
+    # git-lfs trap: filters configured globally but binary missing breaks
+    # checkouts. kdream neutralises this at clone time; surface it anyway.
+    lfs_bin = _shutil.which("git-lfs")
+    lfs_cfg = ""
+    try:
+        import subprocess as _sp
+        lfs_cfg = _sp.run(["git", "config", "--get", "filter.lfs.smudge"],
+                          capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        pass
+    if lfs_cfg and not lfs_bin:
+        row("git-lfs", "configured but binary missing", good=False,
+            note="kdream disables lfs filters at clone time, so this is handled")
+    else:
+        row("git-lfs", lfs_bin or "not installed (fine — kdream does not need it)")
+
+    # ── Hardware ──────────────────────────────────────────────────────
+    console.print("\n[bold]Hardware[/bold]")
+    hw = HardwareDetector().detect()
+    accel_note = {
+        "cuda": f"{hw.get('vram_gb', 0)} GB VRAM, CUDA {hw.get('cuda_version')}",
+        "mps": "Apple Silicon — GPU shares unified memory",
+        "cpu": "no GPU acceleration detected",
+    }.get(hw["device"], "")
+    row("accelerator", hw["device"], good=hw["device"] != "cpu", note=accel_note)
+    total = total_memory_gb()
+    avail = available_memory_gb()
+    row("memory", f"{avail:.1f} GB available / {total:.0f} GB total",
+        good=avail >= 8,
+        note="recipes declare min_vram_gb; the runner waits for free memory "
+             "(KDREAM_MEMORY_WAIT_TIMEOUT) and refuses models that can never fit")
+    cache_dir = Path.home() / ".kdream" / "cache"
+    try:
+        _, _, free = _shutil.disk_usage(cache_dir if cache_dir.exists() else Path.home())
+        row("disk free", f"{free / 1e9:.0f} GB", good=free > 50e9,
+            note="large video/LLM models need 40-150 GB per recipe")
+    except OSError:
+        row("disk free", "unknown", good=False)
+
+    # ── Network ───────────────────────────────────────────────────────
+    if not skip_network:
+        console.print("\n[bold]Network (HuggingFace CDN)[/bold]")
+        console.print("  [dim]probing download speed (default vs IPv4) ...[/dim]")
+        from kdream.core.netutil import diagnose_hf_connectivity
+        net = diagnose_hf_connectivity()
+        ok = not net["recommendation"]
+        row("default route", f"{net['default_mbps']} MB/s", good=ok)
+        row("IPv4-only route", f"{net['ipv4_mbps']} MB/s")
+        if net["recommendation"]:
+            console.print(f"\n[yellow]Recommendation:[/yellow] {net['recommendation']}")
+
+    # ── Knobs ─────────────────────────────────────────────────────────
+    console.print("\n[bold]Environment knobs[/bold]")
+    for var, desc in [
+        ("KDREAM_FORCE_IPV4=1", "pin downloads to IPv4 (broken IPv6 path to CDN)"),
+        ("KDREAM_DISABLE_XET=1", "plain-HTTP HF downloads (Xet backend issues)"),
+        ("KDREAM_DOWNLOAD_RETRIES=N", "download retry attempts (default 8)"),
+        ("KDREAM_MEMORY_WAIT_TIMEOUT=S", "seconds to wait for free memory (default 300)"),
+        ("KDREAM_SKIP_MEMORY_CHECK=1", "bypass the memory gate entirely"),
+        ("KDREAM_DEVICE=cuda|mps|cpu", "override accelerator selection"),
+    ]:
+        env_name = var.split("=")[0]
+        current = os.environ.get(env_name)
+        state = f"[green](set: {current})[/green]" if current else "[dim](unset)[/dim]"
+        console.print(f"  {var:34} {state} [dim]{desc}[/dim]")
+
+
 if __name__ == "__main__":
     cli()

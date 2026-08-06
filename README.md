@@ -272,6 +272,7 @@ Second run is fast — repo, venv, and weights are cached at `~/.kdream/cache/`.
 | `whisper-large-v3` | audio | CPU | OpenAI Whisper transcription |
 | `musicgen-large` | audio | 16 GB | Meta MusicGen music generation |
 | `wan-2-1-t2v` | video-generation | 8 GB | Wan 2.1 text-to-video |
+| `minimax-h3` | video-generation | 22 GB | MiniMax H3 video+audio (int4 on-load quantization, pure Python) |
 
 ---
 
@@ -299,6 +300,7 @@ kdream validate <recipe-file>
 kdream packages [--cache-dir TEXT]
 kdream cache info [--cache-dir TEXT]
 kdream cache clear [--recipe NAME] [--cache-dir TEXT]
+kdream doctor [--skip-network]      # diagnose hardware, memory, disk, HF network path
 
 kdream serve [OPTIONS]                    # start MCP server (requires kdream[service])
   --port INT              Port to bind  [default: 8765]
@@ -315,6 +317,21 @@ kdream remote run <recipe> --url URL [OPTIONS]   # run inference on a remote ser
 kdream remote list --url URL [--tag TAG]... [--backend TEXT]
 kdream remote packages --url URL
 ```
+
+---
+
+## Big Models & Troubleshooting
+
+```bash
+kdream doctor
+```
+
+Diagnoses your machine (tooling, accelerator, memory, disk) and the network
+path to the HuggingFace CDN, and prints the environment knobs that fix what
+it finds. Memory gating, resilient downloads, LFS-safe cloning, and
+quantized-derivative discovery are built in.
+
+Full guide: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ---
 

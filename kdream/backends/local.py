@@ -99,6 +99,164 @@ def detect_accelerator() -> str:
 
 
 # ---------------------------------------------------------------------------
+# System memory helpers + memory gate
+# ---------------------------------------------------------------------------
+
+def total_memory_gb() -> float:
+    """Total physical memory (RAM / unified memory) in GB, 0.0 if unknown."""
+    try:
+        import psutil  # type: ignore[import]
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        pass
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return int(out.stdout.strip()) / (1024 ** 3)
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) / (1024 ** 2)  # kB → GB
+    except Exception:
+        pass
+    return 0.0
+
+
+def available_memory_gb() -> float:
+    """Currently available memory in GB, 0.0 if unknown.
+
+    On macOS the kernel's ``memory_pressure`` free percentage is used: it
+    accounts for reclaimable file cache and compressor pages, which the
+    naive free+inactive page count (and psutil) grossly underestimate on
+    Apple Silicon. Falls back to vm_stat pages, then psutil / meminfo.
+    """
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["memory_pressure"], capture_output=True, text=True, timeout=10,
+            ).stdout
+            m = __import__("re").search(
+                r"free percentage:\s*(\d+)%", out,
+            )
+            if m:
+                total = total_memory_gb()
+                if total:
+                    return total * int(m.group(1)) / 100.0
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=5,
+            ).stdout
+            page_size = 16384
+            m = __import__("re").search(r"page size of (\d+) bytes", out)
+            if m:
+                page_size = int(m.group(1))
+            pages = 0
+            for key in ("Pages free", "Pages inactive", "Pages speculative"):
+                km = __import__("re").search(rf"{key}:\s+(\d+)", out)
+                if km:
+                    pages += int(km.group(1))
+            return pages * page_size / (1024 ** 3)
+        except Exception:
+            return 0.0
+    try:
+        import psutil  # type: ignore[import]
+        return psutil.virtual_memory().available / (1024 ** 3)
+    except ImportError:
+        pass
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / (1024 ** 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+class MemoryGate:
+    """Gate inference on memory availability.
+
+    Behaviour (per the recipe's ``backends.local.min_vram_gb``):
+
+    - requirement exceeds the machine's *total* memory → fail immediately with
+      a clear message (waiting would never succeed);
+    - requirement fits but memory is currently busy → poll until enough is
+      free, up to ``KDREAM_MEMORY_WAIT_TIMEOUT`` seconds (default 300);
+    - set ``KDREAM_SKIP_MEMORY_CHECK=1`` to bypass the gate entirely.
+
+    On CUDA machines the requirement is checked against dedicated GPU VRAM
+    (no waiting — VRAM is not freed by other processes exiting in a way we
+    can poll portably). On MPS/CPU it is checked against system RAM, which on
+    Apple Silicon is the unified memory the GPU uses.
+    """
+
+    POLL_INTERVAL_S = 10.0
+
+    def __init__(self, hardware: HardwareDetector | None = None):
+        self.hardware = hardware or HardwareDetector()
+
+    def ensure(self, required_gb: float) -> None:
+        if required_gb <= 0 or os.environ.get("KDREAM_SKIP_MEMORY_CHECK") == "1":
+            return
+
+        hw = self.hardware.detect()
+        if hw["device"] == "cuda":
+            vram = hw.get("vram_gb") or 0
+            if vram and required_gb > vram:
+                raise BackendError(
+                    f"This recipe needs ~{required_gb:.0f} GB of GPU memory but "
+                    f"this machine's GPU has {vram:.0f} GB. It cannot run here — "
+                    "use a quantized variant or a machine with more VRAM."
+                )
+            return
+
+        total = total_memory_gb()
+        if total and required_gb > total:
+            raise BackendError(
+                f"This recipe needs ~{required_gb:.0f} GB of memory but this "
+                f"machine has {total:.0f} GB total. Waiting will not help — "
+                "it cannot run here. Use a quantized variant, a smaller model, "
+                "or a remote backend (kdream remote run)."
+            )
+
+        timeout_s = float(os.environ.get("KDREAM_MEMORY_WAIT_TIMEOUT", "300"))
+        import time
+        start = time.time()
+        waited = False
+        while True:
+            avail = available_memory_gb()
+            if avail <= 0 or avail >= required_gb:
+                # Unknown availability → don't block; enough available → go.
+                if waited:
+                    console.print(
+                        f"  [green]Memory available "
+                        f"({avail:.1f} GB free ≥ {required_gb:.0f} GB needed).[/green]"
+                    )
+                return
+            elapsed = time.time() - start
+            if elapsed >= timeout_s:
+                raise BackendError(
+                    f"Timed out after {timeout_s:.0f}s waiting for "
+                    f"{required_gb:.0f} GB of free memory "
+                    f"(currently {avail:.1f} GB free of {total:.0f} GB total). "
+                    "Close other applications and retry, or raise "
+                    "KDREAM_MEMORY_WAIT_TIMEOUT."
+                )
+            if not waited:
+                console.print(
+                    f"  [yellow]Waiting for memory:[/yellow] need "
+                    f"{required_gb:.0f} GB free, currently {avail:.1f} GB "
+                    f"(total {total:.0f} GB). Polling every "
+                    f"{self.POLL_INTERVAL_S:.0f}s, timeout {timeout_s:.0f}s…"
+                )
+                waited = True
+            time.sleep(self.POLL_INTERVAL_S)
+
+
+# ---------------------------------------------------------------------------
 # Environment manager
 # ---------------------------------------------------------------------------
 
@@ -111,15 +269,41 @@ class EnvironmentManager:
             console.print(f"  [dim]Repo already cloned at {dest}[/dim]")
             return
 
+        if dest.exists():
+            # Leftover from an interrupted install (no .git) — clear and re-clone.
+            console.print(f"  [dim]Removing incomplete clone at {dest}[/dim]")
+            shutil.rmtree(dest)
+
         console.print(f"  Cloning [cyan]{repo_url}[/cyan] @ {ref} ...")
+        # Never smudge LFS files during clone: model repos (HuggingFace in
+        # particular) can carry hundreds of GB of LFS weights. Weights are
+        # downloaded selectively by ModelManager, not via git. The -c
+        # overrides neutralise any global git-lfs filter config (which
+        # otherwise breaks checkout when git-lfs is missing or tries to
+        # download every weight when it is present); GIT_LFS_SKIP_SMUDGE
+        # covers setups where the lfs filters are baked in elsewhere.
+        clone_env = {"GIT_LFS_SKIP_SMUDGE": "1"}
+        lfs_off = [
+            "-c filter.lfs.smudge=cat",
+            "-c filter.lfs.process=",
+            "-c filter.lfs.required=false",
+        ]
         try:
             import git  # type: ignore[import]
-            git.Repo.clone_from(repo_url, dest, depth=1, branch=ref)
+            git.Repo.clone_from(repo_url, dest, depth=1, branch=ref,
+                                env=clone_env, multi_options=lfs_off,
+                                allow_unsafe_options=True)
         except Exception:
-            # Fallback: try without branch spec (default branch)
+            # Fallback: try without branch spec (default branch). The failed
+            # attempt may have left a partial directory behind — clear it or
+            # the retry fails with "destination path already exists".
+            if dest.exists():
+                shutil.rmtree(dest)
             try:
                 import git  # type: ignore[import]
-                git.Repo.clone_from(repo_url, dest, depth=1)
+                git.Repo.clone_from(repo_url, dest, depth=1,
+                                    env=clone_env, multi_options=lfs_off,
+                                    allow_unsafe_options=True)
             except Exception as e:
                 raise BackendError(f"Failed to clone repository {repo_url}: {e}") from e
 
@@ -309,6 +493,19 @@ class ModelManager:
         repo using ``hf_hub_download`` (fast, avoids pulling the entire repo).
         Otherwise fall back to ``snapshot_download`` for the full repository.
         """
+        from kdream.core.netutil import apply_network_env, with_retry
+
+        for note in apply_network_env():
+            console.print(f"  [dim]{note}[/dim]")
+
+        def _on_retry(attempt: int, attempts: int, exc: Exception) -> None:
+            console.print(
+                f"  [yellow]Download interrupted "
+                f"({type(exc).__name__}) — retry {attempt}/{attempts - 1}. "
+                "If this keeps happening, run `kdream doctor` to diagnose "
+                "the network.[/yellow]"
+            )
+
         if file_path:
             # Single-file download mode
             if dest.exists():
@@ -321,7 +518,10 @@ class ModelManager:
             )
             try:
                 from huggingface_hub import hf_hub_download  # type: ignore[import]
-                cached = hf_hub_download(repo_id, filename=file_path, token=token)
+                cached = with_retry(
+                    hf_hub_download, repo_id, filename=file_path, token=token,
+                    on_retry=_on_retry,
+                )
                 # Symlink to HF cache to avoid duplicating large files on disk
                 try:
                     dest.symlink_to(cached)
@@ -341,7 +541,10 @@ class ModelManager:
             console.print(f"  Downloading HuggingFace model [cyan]{repo_id}[/cyan] ...")
             try:
                 from huggingface_hub import snapshot_download  # type: ignore[import]
-                snapshot_download(repo_id, local_dir=str(dest), token=token)
+                with_retry(
+                    snapshot_download, repo_id, local_dir=str(dest), token=token,
+                    on_retry=_on_retry,
+                )
             except Exception as e:
                 raise ModelDownloadError(f"Failed to download {repo_id}: {e}") from e
 
@@ -631,6 +834,7 @@ class LocalBackend(AbstractBackend):
         self.model_manager = ModelManager()
         self.hardware = HardwareDetector()
         self.runner = InferenceRunner()
+        self.memory_gate = MemoryGate(self.hardware)
 
     def install(
         self,
@@ -663,6 +867,32 @@ class LocalBackend(AbstractBackend):
                 "but none was detected. Inference may be very slow."
             )
 
+        # Fail fast BEFORE downloading weights when the machine can never
+        # satisfy the recipe's memory requirement (avoids multi-GB downloads
+        # for a model that cannot run here).
+        if local_spec and local_spec.min_vram_gb:
+            device = hw["device"]
+            capacity = (
+                (hw.get("vram_gb") or 0) if device == "cuda" else total_memory_gb()
+            )
+            if capacity and local_spec.min_vram_gb > capacity:
+                if os.environ.get("KDREAM_SKIP_MEMORY_CHECK") == "1":
+                    console.print(
+                        "[yellow]Warning:[/yellow] recipe needs "
+                        f"~{local_spec.min_vram_gb} GB but this machine has "
+                        f"{capacity:.0f} GB — continuing anyway "
+                        "(KDREAM_SKIP_MEMORY_CHECK=1)."
+                    )
+                else:
+                    raise BackendError(
+                        f"This recipe needs ~{local_spec.min_vram_gb} GB of "
+                        f"memory but this machine has {capacity:.0f} GB "
+                        f"({device}). Refusing to download weights for a model "
+                        "that cannot run here. Use a quantized variant, a "
+                        "remote backend (kdream remote run), or set "
+                        "KDREAM_SKIP_MEMORY_CHECK=1 to install anyway."
+                    )
+
         if self.verbose:
             console.print(f"  [dim]Hardware: {hw['device']}"
                           + (f", {hw['vram_gb']} GB VRAM" if hw['vram_gb'] else "")
@@ -671,6 +901,20 @@ class LocalBackend(AbstractBackend):
         # 1. Clone repo
         console.print("\n[bold][1/4][/bold] Cloning repo")
         self.env_manager.clone_repo(recipe.source.repo, recipe.source.ref, repo_path)
+
+        # Persist the resolved recipe inside the package so run() can reload
+        # it even when the source repo carries no kdream-recipe.yaml (e.g.
+        # HuggingFace model repos and local recipe files not in the registry).
+        recipe_copy = repo_path / "kdream-recipe.yaml"
+        if not recipe_copy.exists():
+            try:
+                import yaml as _yaml
+                recipe_copy.write_text(
+                    _yaml.safe_dump(recipe.model_dump(mode="json"), sort_keys=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                console.print(f"  [dim]Could not persist recipe copy: {exc}[/dim]")
 
         # 2. Create venv
         console.print("\n[bold][2/4][/bold] Creating virtual environment")
@@ -730,6 +974,12 @@ class LocalBackend(AbstractBackend):
         # Detect best accelerator and inject it
         accelerator = self.hardware.best_accelerator()
         console.print(f"  [dim]Accelerator: [bold]{accelerator}[/bold][/dim]")
+
+        # Memory gate: fail fast when the model can never fit, otherwise wait
+        # (up to KDREAM_MEMORY_WAIT_TIMEOUT) until enough memory is free.
+        local_spec = recipe.backends.local
+        if local_spec and local_spec.min_vram_gb:
+            self.memory_gate.ensure(local_spec.min_vram_gb)
 
         # Apply defaults for missing optional inputs
         merged: dict[str, Any] = {}
