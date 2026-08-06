@@ -285,18 +285,11 @@ def main() -> int:
     state = encode_pipe(**enc_inputs)
     log(f"Phase 1 done in {time.time() - t0:.0f}s")
 
-    carry = {}
-    for name in ("prompt_embeds", "text_token_tags", "condition_latents",
-                 "audio_condition_latents", "normalized_references",
-                 "keyframe_anchors", "height", "width", "num_frames"):
-        try:
-            value = state.get_intermediate(name)
-        except Exception:
-            value = getattr(state, "intermediates", {}).get(name)
-        if value is not None:
-            carry[name] = value
-
-    del encode_pipe, state
+    # Detach encoder outputs to CPU and free the encoder before phase 2.
+    for key, value in list(state.values.items()):
+        if hasattr(value, "detach"):
+            state.values[key] = value.detach().to("cpu")
+    del encode_pipe
     free_memory(device)
 
     # ── Phase 2: denoise + decode ────────────────────────────────────────
@@ -314,9 +307,9 @@ def main() -> int:
 
     denoise_pipe.to(device)
     log(f"Sampling: {args.steps} steps, {num_frames} frames "
-        f"@ {carry.get('width', args.width)}x{carry.get('height', args.height)}, seed={seed}")
+        f"@ {args.width}x{args.height}, seed={seed}")
     out = denoise_pipe(
-        **carry,
+        state=state,
         generator=generator,
         num_inference_steps=args.steps,
         output_type="np",
@@ -326,8 +319,12 @@ def main() -> int:
         videos, audio, sampling_rate = (
             out.get("videos"), out.get("audio"), out.get("sampling_rate"),
         )
-    else:
+    elif isinstance(out, (list, tuple)):
         videos, audio, sampling_rate = out
+    else:  # a PipelineState
+        videos, audio, sampling_rate = (
+            out.get("videos"), out.get("audio"), out.get("sampling_rate"),
+        )
     log(f"Phase 2 done in {time.time() - t1:.0f}s")
 
     import numpy as np
