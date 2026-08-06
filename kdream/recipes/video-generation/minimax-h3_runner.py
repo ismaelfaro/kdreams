@@ -171,9 +171,26 @@ def main() -> int:
     dtype = torch.bfloat16 if device != "cpu" else torch.float32
     log(f"device={device} dtype={dtype} quantization={args.quantization}")
 
+    if os.environ.get("KDREAM_FORCE_IPV4") == "1":
+        # Some networks have a broken/throttled IPv6 path to the HF CDN.
+        import socket
+        _orig_gai = socket.getaddrinfo
+        socket.getaddrinfo = lambda host, port, family=0, type=0, proto=0, flags=0: \
+            _orig_gai(host, port, socket.AF_INET, type, proto, flags)
+
     from huggingface_hub import snapshot_download
     log("Ensuring model components (downloads only what is missing) ...")
-    local_path = snapshot_download(REPO_ID, allow_patterns=ALLOW_PATTERNS)
+    last_exc = None
+    for attempt in range(1, 11):
+        try:
+            local_path = snapshot_download(REPO_ID, allow_patterns=ALLOW_PATTERNS)
+            break
+        except Exception as exc:  # transient CDN disconnects are common at this size
+            last_exc = exc
+            log(f"download attempt {attempt}/10 failed ({type(exc).__name__}); retrying ...")
+            time.sleep(min(60, 5 * attempt))
+    else:
+        raise RuntimeError(f"Could not download model components: {last_exc}")
 
     seed = args.seed if args.seed != -1 else int.from_bytes(os.urandom(4), "big")
     generator = torch.Generator("cpu").manual_seed(seed)
