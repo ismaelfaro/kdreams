@@ -1,0 +1,101 @@
+apiVersion: kdream/v1
+kind: Recipe
+metadata:
+  name: minimax-h3
+  version: 2.0.0
+  description: MiniMax H3 omni-modal video generation with native stereo audio, text/image-to-video. Pure-Python inference via diffusers (no ComfyUI, no external server) — components are quantized to int4 on load with optimum-quanto and run in two sequential phases (text encoder, then DiT), peaking around 20 GB so it fits 32 GB Apple Silicon. Weights download from the official diffusers-format repo (only the needed subfolders, ~144 GB on disk).
+  tags: [video-generation, image-to-video, multimodal, diffusion, transformer, quantized, pure-python, open-source]
+  license: MiniMax H3 Community License Agreement
+  author: kdream-community
+
+source:
+  repo: https://huggingface.co/MiniMaxAI/MiniMax-H3
+  ref: main
+  install_extras:
+    - torch
+    - git+https://github.com/huggingface/diffusers.git
+    - transformers
+    - accelerate
+    - optimum-quanto
+    - av
+    - sentencepiece
+    - protobuf
+    - numpy
+    - pillow
+    - huggingface-hub
+  skip_package_install: true
+
+# Weights are fetched by the runner via snapshot_download (subfolder
+# patterns) into the shared HuggingFace cache — declaring them here would
+# duplicate ~144 GB into the package dir.
+models: []
+
+entrypoint:
+  script: run.py
+  type: python
+  generated_wrapper: true
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: Text description of the video to generate
+
+  first_frame_image:
+    type: string
+    required: false
+    default: ""
+    description: Path to the first frame image for image-to-video generation (optional; leave empty for text-to-video)
+
+  last_frame_image:
+    type: string
+    required: false
+    default: ""
+    description: Path to the last frame image for first-and-last-frame generation (optional)
+
+  duration:
+    type: float
+    required: false
+    default: 5.0
+    description: Output video duration in seconds at 24 fps (snapped to the model's frame grid)
+
+  width:
+    type: integer
+    required: false
+    default: 1280
+    description: Output video width in pixels
+
+  height:
+    type: integer
+    required: false
+    default: 768
+    description: Output video height in pixels
+
+  steps:
+    type: integer
+    required: false
+    default: 30
+    description: Number of diffusion sampling steps
+
+  seed:
+    type: integer
+    required: false
+    default: -1
+    description: Random seed for reproducibility (-1 for random)
+
+  quantization:
+    type: string
+    required: false
+    default: int4
+    description: On-load weight quantization via optimum-quanto — int4 (fits 32 GB), int8 (48 GB+), or bf16 (needs ~150 GB, server-class only)
+
+outputs:
+  - name: result
+    type: file
+    path: outputs/{timestamp}.mp4
+
+backends:
+  local:
+    requires_gpu: false
+    min_vram_gb: 22
+    tested_on: [mps]
