@@ -493,6 +493,19 @@ class ModelManager:
         repo using ``hf_hub_download`` (fast, avoids pulling the entire repo).
         Otherwise fall back to ``snapshot_download`` for the full repository.
         """
+        from kdream.core.netutil import apply_network_env, with_retry
+
+        for note in apply_network_env():
+            console.print(f"  [dim]{note}[/dim]")
+
+        def _on_retry(attempt: int, attempts: int, exc: Exception) -> None:
+            console.print(
+                f"  [yellow]Download interrupted "
+                f"({type(exc).__name__}) — retry {attempt}/{attempts - 1}. "
+                "If this keeps happening, run `kdream doctor` to diagnose "
+                "the network.[/yellow]"
+            )
+
         if file_path:
             # Single-file download mode
             if dest.exists():
@@ -505,7 +518,10 @@ class ModelManager:
             )
             try:
                 from huggingface_hub import hf_hub_download  # type: ignore[import]
-                cached = hf_hub_download(repo_id, filename=file_path, token=token)
+                cached = with_retry(
+                    hf_hub_download, repo_id, filename=file_path, token=token,
+                    on_retry=_on_retry,
+                )
                 # Symlink to HF cache to avoid duplicating large files on disk
                 try:
                     dest.symlink_to(cached)
@@ -525,7 +541,10 @@ class ModelManager:
             console.print(f"  Downloading HuggingFace model [cyan]{repo_id}[/cyan] ...")
             try:
                 from huggingface_hub import snapshot_download  # type: ignore[import]
-                snapshot_download(repo_id, local_dir=str(dest), token=token)
+                with_retry(
+                    snapshot_download, repo_id, local_dir=str(dest), token=token,
+                    on_retry=_on_retry,
+                )
             except Exception as e:
                 raise ModelDownloadError(f"Failed to download {repo_id}: {e}") from e
 
