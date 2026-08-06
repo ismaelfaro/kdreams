@@ -283,7 +283,11 @@ class EnvironmentManager:
             import git  # type: ignore[import]
             git.Repo.clone_from(repo_url, dest, depth=1, branch=ref, env=clone_env)
         except Exception:
-            # Fallback: try without branch spec (default branch)
+            # Fallback: try without branch spec (default branch). The failed
+            # attempt may have left a partial directory behind — clear it or
+            # the retry fails with "destination path already exists".
+            if dest.exists():
+                shutil.rmtree(dest)
             try:
                 import git  # type: ignore[import]
                 git.Repo.clone_from(repo_url, dest, depth=1, env=clone_env)
