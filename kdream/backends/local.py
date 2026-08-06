@@ -291,7 +291,8 @@ class EnvironmentManager:
         try:
             import git  # type: ignore[import]
             git.Repo.clone_from(repo_url, dest, depth=1, branch=ref,
-                                env=clone_env, multi_options=lfs_off)
+                                env=clone_env, multi_options=lfs_off,
+                                allow_unsafe_options=True)
         except Exception:
             # Fallback: try without branch spec (default branch). The failed
             # attempt may have left a partial directory behind — clear it or
@@ -301,7 +302,8 @@ class EnvironmentManager:
             try:
                 import git  # type: ignore[import]
                 git.Repo.clone_from(repo_url, dest, depth=1,
-                                    env=clone_env, multi_options=lfs_off)
+                                    env=clone_env, multi_options=lfs_off,
+                                    allow_unsafe_options=True)
             except Exception as e:
                 raise BackendError(f"Failed to clone repository {repo_url}: {e}") from e
 
